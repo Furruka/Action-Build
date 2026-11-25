@@ -102,7 +102,7 @@ jobs:
             echo "--- tools ---"; ls tools 2>/dev/null | head
           } | tee ../bazel_diag.log
           ./tools/bazel version 2>&1 | tee -a ../bazel_diag.log || true
-          FLAGS="--noenable_bzlmod --//build/bazel_mgk_rules:kernel_version=6.12 --repo_manifest=$PWD/kernel:$PWD/kernel/kernel_device_modules-6.12/fake_manifest.xml"
+          FLAGS="--enable_workspace --noenable_bzlmod --//build/bazel_mgk_rules:kernel_version=6.12 --repo_manifest=$PWD/kernel:$PWD/kernel/kernel_device_modules-6.12/fake_manifest.xml"
           echo "official-flags: $FLAGS" | tee -a ../bazel_diag.log
           ./tools/bazel query $FLAGS //kernel_device_modules-6.12:mgk_64_k612_customer_modules_install.user 2>&1 | tail -40 | tee ../bazel_query.log
           if grep -qE "ERROR:|No such file|not defined" ../bazel_query.log; then echo QUERY_FAILED; exit 1; fi
