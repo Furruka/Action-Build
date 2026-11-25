@@ -108,16 +108,19 @@ jobs:
           modules="$(realpath -e kernel/kernel_device_modules-6.12)"
           patch="$GITHUB_WORKSPACE/ci-patches/0001-v3d.patch"
           fdt_fix="$GITHUB_WORKSPACE/ci-patches/0002-v3e-fdt-state.patch"
+          init_fix="$GITHUB_WORKSPACE/ci-patches/0003-v3f-init-sections.patch"
           fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
           printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
           git -C "$core" rev-parse HEAD
           git -C "$modules" rev-parse HEAD
           test "$(realpath -e "$(git -C "$core" rev-parse --show-toplevel)")" = "$core"
-          sha256sum "$patch" "$fdt_fix" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
+          sha256sum "$patch" "$fdt_fix" "$init_fix" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
           git -C "$core" apply --check --verbose "$patch"
           git -C "$core" apply --verbose "$patch"
           git -C "$core" apply --check --verbose "$fdt_fix"
           git -C "$core" apply --verbose "$fdt_fix"
+          git -C "$core" apply --check --verbose "$init_fix"
+          git -C "$core" apply --verbose "$init_fix"
           git -C "$core" status --short
           grep -F 'static struct mfdt_ctx ctx __initdata' "$core/arch/arm64/kernel/mtk_embed_merge.c"
           grep -Fx 'config MTK_EMBED_BOARD_DTB' "$core/arch/arm64/Kconfig"
@@ -127,6 +130,15 @@ jobs:
           printf '\nexports_files(["kernel/configs/qqcandy-embed.config"])\n' >> "$modules/BUILD.bazel"
           sha256sum "$core/arch/arm64/kernel/mtk_embed_merge.c" "$dtb"
 
+      - name: Check the USB module build graph
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/ws/kernel"
+          mkdir -p qqcandy_usb
+          install -m 644 "$GITHUB_WORKSPACE/ci-files/qqcandy-usb.BUILD.bazel" qqcandy_usb/BUILD.bazel
+          ./tools/bazel build "$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" --nobuild \
+            //qqcandy_usb:qqcandy_usb_modules_install 2>&1 | tee ../usb_analysis.log
+
       - name: B and C build configuration and verify the linked DTB
         run: |
           set -euo pipefail
@@ -135,7 +147,8 @@ jobs:
           image_target=mgk_64_k612_kernel_aarch64.user
           target="//$package:$image_target"
           flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG")
-          printf 'Target: %s\nBazel option: %s\n' "$target" "${flags[@]}"
+          printf 'Target: %s\n' "$target"
+          printf 'Bazel option: %s\n' "${flags[@]}"
 
           config_action='inputs(".*qqcandy-embed[.]config", mnemonic("^KernelConfig$", '
           ./tools/bazel aquery "${flags[@]}" --include_artifacts=false \
@@ -184,8 +197,6 @@ jobs:
           flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG")
           usb_target=//qqcandy_usb:qqcandy_usb_modules_install
           device_target=//kernel_device_modules-6.12:mgk_64_k612.user
-          mkdir -p qqcandy_usb
-          install -m 644 "$GITHUB_WORKSPACE/ci-files/qqcandy-usb.BUILD.bazel" qqcandy_usb/BUILD.bazel
           ./tools/bazel build "${flags[@]}" "$usb_target" 2>&1 | tee ../usb_build.log
           if grep -iE 'needs unknown symbol|disagrees about version|depmod: ERROR' ../usb_build.log; then
             echo 'The USB module set has unresolved symbols' >&2
@@ -222,7 +233,7 @@ jobs:
         run: |
           cd $RUNNER_TEMP/ws || exit 0
           : > first_error.log
-          for f in sync.log a5.log config_build.log bazel_build.log usb_build.log; do
+          for f in sync.log a5.log usb_analysis.log config_build.log bazel_build.log usb_build.log; do
             [ -f "$f" ] || continue
             echo "### $f" >> first_error.log
             if match="$(grep -n -m1 -iE 'No such file|error:|couldn.t find|FAILED:' "$f")"; then

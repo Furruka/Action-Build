@@ -1,0 +1,135 @@
+diff --git a/arch/arm64/kernel/mtk_embed_merge.c b/arch/arm64/kernel/mtk_embed_merge.c
+index 24dcfad..2c831be 100644
+--- a/arch/arm64/kernel/mtk_embed_merge.c
++++ b/arch/arm64/kernel/mtk_embed_merge.c
+@@ -23,7 +23,7 @@ struct mfdt_map {
+ 
+ #define MFDT_MAX_TOUCH 128
+ static const char *const mfdt_refprops[] = { "memory-region", "interconnects", "iommus" };
+-static bool mfdt_is_refprop(const char *n)
++static bool __init mfdt_is_refprop(const char *n)
+ {
+ 	size_t i;
+ 	for (i = 0; i < sizeof(mfdt_refprops)/sizeof(mfdt_refprops[0]); i++)
+@@ -49,7 +49,7 @@ struct mfdt_ctx {
+ 	int ntouch;
+ };
+ 
+-static int mfdt_status(struct mfdt_ctx *c, int ret)
++static int __init mfdt_status(struct mfdt_ctx *c, int ret)
+ {
+ 	if (ret) {
+ 		if (!c->error)
+@@ -59,9 +59,9 @@ static int mfdt_status(struct mfdt_ctx *c, int ret)
+ 	return ret;
+ }
+ 
+-static void mfdt_record(struct mfdt_ctx *c, int off, const char *name);
++static void __init mfdt_record(struct mfdt_ctx *c, int off, const char *name);
+ 
+-static int mfdt_copy_props(struct mfdt_ctx *c, int lk_off, int d_off, bool skip_phandle)
++static int __init mfdt_copy_props(struct mfdt_ctx *c, int lk_off, int d_off, bool skip_phandle)
+ {
+ 	int poff, len, ret;
+ 	const char *name;
+@@ -82,7 +82,7 @@ static int mfdt_copy_props(struct mfdt_ctx *c, int lk_off, int d_off, bool skip_
+ 	return poff == -FDT_ERR_NOTFOUND ? 0 : mfdt_status(c, poff);
+ }
+ 
+-static void mfdt_record(struct mfdt_ctx *c, int off, const char *name)
++static void __init mfdt_record(struct mfdt_ctx *c, int off, const char *name)
+ {
+ 	if (c->ntouch >= MFDT_MAX_TOUCH || strlen(name) >= sizeof(c->touch[0].name)) {
+ 		mfdt_status(c, -FDT_ERR_NOSPACE);
+@@ -95,7 +95,7 @@ static void mfdt_record(struct mfdt_ctx *c, int off, const char *name)
+ 	c->ntouch++;
+ }
+ 
+-static int mfdt_copy_node(struct mfdt_ctx *c, int lk_off, int d_parent, const char *name)
++static int __init mfdt_copy_node(struct mfdt_ctx *c, int lk_off, int d_parent, const char *name)
+ {
+ 	int d_off, ret;
+ 	uint32_t ph;
+@@ -138,7 +138,7 @@ static int mfdt_copy_node(struct mfdt_ctx *c, int lk_off, int d_parent, const ch
+ }
+ 
+ /* Rewrite phandle references only inside properties we copied from LK. */
+-static void mfdt_fixup_refs(struct mfdt_ctx *c)
++static void __init mfdt_fixup_refs(struct mfdt_ctx *c)
+ {
+ 	static const char *const refprops[] = { "memory-region", "interconnects", "iommus" };
+ 	int t;
+@@ -190,7 +190,7 @@ static void mfdt_fixup_refs(struct mfdt_ctx *c)
+ 	}
+ }
+ 
+-static int mfdt_merge_reserved(struct mfdt_ctx *c)
++static int __init mfdt_merge_reserved(struct mfdt_ctx *c)
+ {
+ 	int lk_rm = fdt_path_offset(c->lk, "/reserved-memory");
+ 	int d_rm = fdt_path_offset(c->dst, "/reserved-memory");
+@@ -223,7 +223,7 @@ static int mfdt_merge_reserved(struct mfdt_ctx *c)
+ 
+ /* LK injects memory-region on nodes that already exist in our tree (wifi@18000000).
+  * Copy the raw value here; mfdt_fixup_refs() rewrites the phandle afterwards. */
+-static void mfdt_merge_memregions(struct mfdt_ctx *c)
++static void __init mfdt_merge_memregions(struct mfdt_ctx *c)
+ {
+ 	int off;
+ 	char path[256];
+@@ -246,7 +246,7 @@ static void mfdt_merge_memregions(struct mfdt_ctx *c)
+ 	}
+ }
+ 
+-static int mfdt_merge_memory(struct mfdt_ctx *c)
++static int __init mfdt_merge_memory(struct mfdt_ctx *c)
+ {
+ 	static const char *const props[] = { "reg", "mblock_info" };
+ 	int lk = fdt_path_offset(c->lk, "/memory");
+@@ -265,7 +265,7 @@ static int mfdt_merge_memory(struct mfdt_ctx *c)
+ 	return 0;
+ }
+ 
+-static int mfdt_merge_chosen(struct mfdt_ctx *c)
++static int __init mfdt_merge_chosen(struct mfdt_ctx *c)
+ {
+ 	int lk = fdt_path_offset(c->lk, "/chosen");
+ 	int d = fdt_path_offset(c->dst, "/chosen");
+@@ -295,7 +295,7 @@ static int mfdt_merge_chosen(struct mfdt_ctx *c)
+ 	return 0;
+ }
+ 
+-static int mfdt_merge_node_props(struct mfdt_ctx *c, const char *path)
++static int __init mfdt_merge_node_props(struct mfdt_ctx *c, const char *path)
+ {
+ 	int lk = fdt_path_offset(c->lk, path);
+ 	int d = fdt_path_offset(c->dst, path);
+@@ -316,7 +316,7 @@ static int mfdt_merge_node_props(struct mfdt_ctx *c, const char *path)
+ 	return 0;
+ }
+ 
+-static void mfdt_copy_whole(struct mfdt_ctx *c, const char *path)
++static void __init mfdt_copy_whole(struct mfdt_ctx *c, const char *path)
+ {
+ 	int lk = fdt_path_offset(c->lk, path);
+ 	int d;
+diff --git a/arch/arm64/kernel/mtk_embed_merge.h b/arch/arm64/kernel/mtk_embed_merge.h
+index 8ac5453..a92aa7f 100644
+--- a/arch/arm64/kernel/mtk_embed_merge.h
++++ b/arch/arm64/kernel/mtk_embed_merge.h
+@@ -2,6 +2,7 @@
+ #ifndef MTK_EMBED_MERGE_H
+ #define MTK_EMBED_MERGE_H
+ 
++#include <linux/init.h>
+ #include <linux/libfdt.h>
+ 
+ 
+@@ -11,6 +12,6 @@ struct mfdt_stats {
+ 	int remapped;
+ };
+ 
+-int mfdt_merge(void *dst, const void *lk, size_t capacity, struct mfdt_stats *st);
++int __init mfdt_merge(void *dst, const void *lk, size_t capacity, struct mfdt_stats *st);
+ 
+ #endif
