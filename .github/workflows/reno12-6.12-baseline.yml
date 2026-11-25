@@ -68,54 +68,35 @@ jobs:
           done | tee layout.log
           find kernel_platform/prebuilts/kernel-build-tools -maxdepth 4 -name py3-cmd 2>/dev/null | head -3 | tee -a layout.log
 
-      - name: A4 prebuilts musl shim
+      - name: A4 bind-mount prebuilts/external into the workspace
         run: |
           set -eo pipefail
           cd $RUNNER_TEMP/ws
-          echo "--- dirs named linux_musl-x86 ---"
-          find $PWD -maxdepth 8 -type d -name linux_musl-x86 2>/dev/null | tee find_musl.log || true
-          echo "--- files named py3-cmd ---"
-          find $PWD -maxdepth 10 -type f -name py3-cmd 2>/dev/null | head -10 | tee -a find_musl.log
-          rm -rf kernel/prebuilts/build-tools
-          mkdir -p kernel/prebuilts/build-tools
-          ln -sfn "$PWD/kernel_platform/prebuilts/build-tools/linux-x86" kernel/prebuilts/build-tools/linux_musl-x86
-          ls -l kernel/prebuilts/build-tools/ | tee -a find_musl.log
-          kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd -c 'print("PY3CMD_OK")' | tee -a find_musl.log
-          # bazel.py wants <ws>/kernel/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel
-          ln -sfn "$PWD/kernel_platform/prebuilts/kernel-build-tools" kernel/prebuilts/kernel-build-tools
-          ls -l kernel/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel 2>/dev/null | tee -a find_musl.log             || echo "BAZEL_BIN_MISSING" | tee -a find_musl.log
-          # kleaf resolves local_repository("external/<x>") relative to the workspace root (kernel/)
-          mkdir -p kernel/external
-          for d in kernel_platform/external/*; do ln -sfn "$PWD/$d" "kernel/external/$(basename $d)"; done
-          ls kernel/external | head -20 | tee -a find_musl.log
-          # kleaf loads //build/bazel_common_rules/... from the workspace root
-          if [ -d kernel_platform/build/bazel_common_rules ] && [ ! -e kernel/build/bazel_common_rules ]; then
-            ln -sfn "$PWD/kernel_platform/build/bazel_common_rules" kernel/build/bazel_common_rules
-            echo "linked bazel_common_rules"
-          fi
-          ls -l kernel/build/ | head -8 | tee -a find_musl.log
-          # kleaf globs build-tools/sysroot under the workspace root
-          echo "--- sysroot dirs ---" | tee -a find_musl.log
-          find $PWD -maxdepth 7 -type d -name sysroot 2>/dev/null | head -10 | tee -a find_musl.log
-          S=$(find $PWD -maxdepth 7 -type d -name sysroot 2>/dev/null | head -1)
-          if [ -n "$S" ]; then
-            mkdir -p kernel/build/build-tools
-            rm -rf kernel/build/build-tools/sysroot
-            cp -a "$S" kernel/build/build-tools/sysroot
-            mkdir -p kernel/build/kernel/build-tools
-            rm -rf kernel/build/kernel/build-tools/sysroot
-            cp -a "$S" kernel/build/kernel/build-tools/sysroot
-            echo "copied sysroot -> $S (both build/ and build/kernel/)" | tee -a find_musl.log
-            ls kernel/build/kernel/build-tools/sysroot | head -3 | tee -a find_musl.log
-            du -sh kernel/build/build-tools/sysroot 2>/dev/null | tee -a find_musl.log
-            find kernel/build/build-tools/sysroot -maxdepth 2 | head -5 | tee -a find_musl.log
-          else
-            echo "NO_SYSROOT_FOUND" | tee -a find_musl.log
-          fi
-          mkdir -p kernel/prebuilts/clang/host
-          ln -sfn "$PWD/kernel_platform/prebuilts/clang/host/linux-x86" kernel/prebuilts/clang/host/linux-x86
-          ls -l kernel/prebuilts/clang/host/ | tee -a find_musl.log
-
+          echo '--- kernel top (before) ---'
+          ls -la kernel | head -20
+          echo '--- kernel/prebuilts kernel/build kernel/tools kernel/external ---'
+          ls -la kernel/prebuilts kernel/build kernel/tools kernel/external 2>/dev/null | head -30
+          sudo rm -rf kernel/prebuilts kernel/external
+          mkdir -p kernel/prebuilts kernel/external
+          sudo mount --bind kernel_platform/prebuilts kernel/prebuilts
+          sudo mount --bind kernel_platform/external kernel/external
+          mkdir -p kernel/build/bazel_common_rules
+          sudo mount --bind kernel_platform/build/bazel_common_rules kernel/build/bazel_common_rules 2>/dev/null || true
+          echo '--- kernel/prebuilts after mount ---'
+          ls kernel/prebuilts | head -20
+          ls -l kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd 2>/dev/null || echo NO_MUSL
+          ls -l kernel/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel 2>/dev/null || echo NO_BAZEL_BIN
+          echo '--- sysroot ---'
+          S=$(find $PWD/kernel_platform -maxdepth 7 -type d -name sysroot 2>/dev/null | head -1)
+          echo "sysroot source: $S"
+          mkdir -p kernel/build/kernel/build-tools
+          rm -rf kernel/build/kernel/build-tools/sysroot
+          cp -a "$S" kernel/build/kernel/build-tools/sysroot
+          mkdir -p kernel/build/build-tools
+          rm -rf kernel/build/build-tools/sysroot
+          cp -a "$S" kernel/build/build-tools/sysroot
+          echo '--- external ---'
+          ls kernel/external | head -15
       - name: B0 bazel diag + query
         run: |
           set -o pipefail
