@@ -1,18 +1,17 @@
-name: Reno12 6.12 baseline probe
+name: Reno12 6.12 baseline (A/B/C)
 
 on:
   workflow_dispatch:
   push:
     branches: [reno12-6.12-baseline]
-    inputs:
-      stage:
-        description: "A=sync+layout, B=bazel query, C=full build"
-        default: "A"
 
 jobs:
   probe:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: free disk
         run: |
@@ -21,63 +20,85 @@ jobs:
           sudo apt-get clean
           df -h / | tail -1
 
-      - name: env
+      - name: env + repo
         run: |
+          set -o pipefail
           nproc; free -g | head -2; df -h / | tail -1
-          sudo apt-get update -qq && sudo apt-get install -y -qq git python3 curl
-
-      - name: install repo
-        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq git python3 curl unzip zip
           mkdir -p ~/bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod +x ~/bin/repo; echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: A1 repo init
+      - name: A1 init + local manifest
         run: |
+          set -eo pipefail
           mkdir -p $RUNNER_TEMP/ws && cd $RUNNER_TEMP/ws
-          repo init -u https://github.com/Numbersf/Kernel_Manifest_Appendix -b oppo/mt6896 -m oppo_reno12_b.xml --depth=1 --no-repo-verify 2>&1 | tail -20
-          ls .repo/manifests | head
+          repo init -u https://github.com/Numbersf/Kernel_Manifest_Appendix -b oppo/mt6896 -m oppo_reno12_b.xml --depth=1 --no-repo-verify 2>&1 | tail -5
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/remove-bad.xml <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remove-project name="kernel_platform/prebuilts/asuite" />
+  <remove-project name="kernel_platform/tools/tradefederation/prebuilts" />
+</manifest>
+EOF
+          cat .repo/local_manifests/remove-bad.xml
 
-      - name: A2 repo sync
+      - name: A2 sync
         run: |
+          set -o pipefail
           cd $RUNNER_TEMP/ws
-          set +e
-          repo sync -c -j8 --no-clone-bundle --no-tags --force-sync 2>&1 | tee sync.log
-          df -h / | tail -1
-          du -sh . | tail -1
+          repo sync -c -j8 --no-clone-bundle --no-tags --force-sync 2>&1 | tee sync.log | tail -20
+          echo "--- sync errors:"; grep -c "SyncError\|SyncFailFastError" sync.log || true
+          df -h / | tail -1; du -sh . | tail -1
 
-      - name: A3 layout probe
+      - name: A3 layout + py3-cmd provenance
         run: |
+          set -eo pipefail
           cd $RUNNER_TEMP/ws
-          for p in kernel kernel-6.12 kernel_platform kernel_device_modules-6.12 \
+          for p in kernel kernel-6.12 kernel_platform kernel_platform/common \
                    kernel/kernel_device_modules-6.12 \
-                   kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd \
+                   kernel/prebuilts/build-tools \
+                   kernel_platform/prebuilts/kernel-build-tools \
                    kernel_platform/prebuilts/clang/host/linux-x86 \
-                   kernel_platform/external/qcom-dtc \
-                   kernel_platform/common; do
+                   kernel/tools/bazel kernel/build/kernel/kleaf/bazel.origin.sh; do
             [ -e "$p" ] && echo "EXIST   $p" || echo "MISSING $p"
           done | tee layout.log
+          find kernel_platform/prebuilts/kernel-build-tools -maxdepth 4 -name py3-cmd 2>/dev/null | head -3 | tee -a layout.log
 
-      - name: B1 bazel query
-        if: ${{ inputs.stage != 'A' }}
+      - name: A4 link prebuilts where kleaf expects them
         run: |
-          cd $RUNNER_TEMP/ws/kernel 2>/dev/null || cd $RUNNER_TEMP/ws
-          set +e
-          bazel query "kind(kernel_build, //...)" 2>&1 | tail -40 | tee bazel_query.log
+          set -eo pipefail
+          cd $RUNNER_TEMP/ws
+          mkdir -p kernel/prebuilts
+          ln -sfn "$PWD/kernel_platform/prebuilts/kernel-build-tools" kernel/prebuilts/build-tools
+          ln -sfn "$PWD/kernel_platform/prebuilts/clang/host/linux-x86" kernel/prebuilts/clang 2>/dev/null || true
+          ls -l kernel/prebuilts/ | tee -a layout.log
+          ls kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd 2>/dev/null && echo PY3CMD_OK || echo PY3CMD_MISSING
 
-      - name: B2 bazel nobuild
-        if: ${{ inputs.stage == 'B' || inputs.stage == 'C' }}
+      - name: B0 bazel query
         run: |
+          set -o pipefail
           cd $RUNNER_TEMP/ws/kernel
-          set +e
-          bazel build --nobuild //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -80 | tee bazel_nobuild.log
+          chmod +x tools/bazel 2>/dev/null || true
+          ./tools/bazel --version 2>&1 | tail -3 || true
+          ./tools/bazel query "kind(kernel_build, //...)" 2>&1 | tail -30 | tee ../bazel_query.log
+
+      - name: B1 nobuild
+        run: |
+          set -o pipefail
+          cd $RUNNER_TEMP/ws/kernel
+          ./tools/bazel build --nobuild //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -120 | tee ../bazel_nobuild.log
+          if grep -qE "ERROR:|No such file" ../bazel_nobuild.log; then echo "NOBUILD_FAILED"; exit 1; fi
+          echo NOBUILD_OK
 
       - name: C build
-        if: ${{ inputs.stage == 'C' }}
         run: |
+          set -o pipefail
           cd $RUNNER_TEMP/ws/kernel
-          set +e
-          bazel build -k //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -200 | tee bazel_build.log
+          ./tools/bazel build -k //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -200 | tee ../bazel_build.log
+          ls -la bazel-bin/kernel_device_modules-6.12/ 2>/dev/null | head -10 | tee -a ../bazel_build.log
+          if grep -qE "ERROR:" ../bazel_build.log; then echo BUILD_FAILED; exit 1; fi
 
       - name: first error extraction
         if: always()
@@ -87,22 +108,10 @@ jobs:
           for f in sync.log bazel_query.log bazel_nobuild.log bazel_build.log; do
             [ -f "$f" ] || continue
             echo "### $f" >> first_error.log
-            ln=$(grep -n -m1 -iE "No such file|error:|ERROR:|FAILED:" "$f" | cut -d: -f1)
-            if [ -n "$ln" ]; then
-              s=$((ln-10)); [ $s -lt 1 ] && s=1
-              sed -n "${s},$((ln+20))p" "$f" >> first_error.log
-            else echo "(no keyword hit)" >> first_error.log; fi
+            ln=$(grep -n -m1 -iE "No such file|ERROR:|error:|couldn.t find|FAILED:" "$f" | cut -d: -f1)
+            if [ -n "$ln" ]; then s=$((ln-10)); [ $s -lt 1 ] && s=1; sed -n "${s},$((ln+20))p" "$f" >> first_error.log; else echo "(none)" >> first_error.log; fi
           done
           cat first_error.log
-
-      - name: collect logs
-        if: always()
-        run: |
-          cd $RUNNER_TEMP/ws || exit 0
-          for f in sync.log bazel_query.log bazel_nobuild.log bazel_build.log layout.log first_error.log; do
-            [ -f "$f" ] && tail -200 "$f" > "$f.tail200" || true
-          done
-          ls -la *.tail200 first_error.log 2>/dev/null
 
       - name: upload logs
         if: always()
@@ -111,15 +120,14 @@ jobs:
           name: reno12-logs
           path: |
             ${{ runner.temp }}/ws/*.log
-            ${{ runner.temp }}/ws/*.tail200
             ${{ runner.temp }}/ws/layout.log
 
       - name: upload images
-        if: ${{ inputs.stage == 'C' }}
+        if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: reno12-images
           path: |
-            ${{ runner.temp }}/ws/kernel/bazel-bin/**/*.ko
-            ${{ runner.temp }}/ws/kernel/bazel-bin/**/Image*
+            ${{ runner.temp }}/ws/kernel/bazel-bin/kernel_device_modules-6.12/**/*.ko
+            ${{ runner.temp }}/ws/kernel/bazel-bin/kernel_device_modules-6.12/**/Image*
