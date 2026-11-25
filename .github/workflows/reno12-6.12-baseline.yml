@@ -102,9 +102,9 @@ jobs:
             echo "--- tools ---"; ls tools 2>/dev/null | head
           } | tee ../bazel_diag.log
           ./tools/bazel version 2>&1 | tee -a ../bazel_diag.log || true
-          FLAGS="--noenable_bzlmod --config=stamp --experimental_writable_outputs --//build/bazel_mgk_rules:kernel_version=6.12 --repo_manifest=$PWD/kernel_device_modules-6.12/fake_manifest.xml"
+          FLAGS="--noenable_bzlmod --config=stamp --//build/bazel_mgk_rules:kernel_version=6.12 --repo_manifest=$PWD/kernel:$PWD/kernel/kernel_device_modules-6.12/fake_manifest.xml"
           echo "official-flags: $FLAGS" | tee -a ../bazel_diag.log
-          ./tools/bazel query $FLAGS //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -40 | tee ../bazel_query.log
+          ./tools/bazel query $FLAGS //kernel_device_modules-6.12:mgk_64_k612_customer_modules_install.user 2>&1 | tail -40 | tee ../bazel_query.log
           if grep -qE "ERROR:|No such file|not defined" ../bazel_query.log; then echo QUERY_FAILED; exit 1; fi
           echo QUERY_OK
 
@@ -112,7 +112,7 @@ jobs:
         run: |
           set -o pipefail
           cd $RUNNER_TEMP/ws/kernel
-          ./tools/bazel build --nobuild //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -120 | tee ../bazel_nobuild.log
+          ./tools/bazel build $FLAGS --nobuild //kernel_device_modules-6.12:mgk_64_k612_customer_modules_install.user 2>&1 | tail -120 | tee ../bazel_nobuild.log
           if grep -qE "ERROR:|No such file" ../bazel_nobuild.log; then echo "NOBUILD_FAILED"; exit 1; fi
           echo NOBUILD_OK
 
@@ -120,7 +120,7 @@ jobs:
         run: |
           set -o pipefail
           cd $RUNNER_TEMP/ws/kernel
-          ./tools/bazel build -k //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -200 | tee ../bazel_build.log
+          ./tools/bazel build $FLAGS -k //kernel_device_modules-6.12:mgk_64_k612_customer_modules_install.user 2>&1 | tail -200 | tee ../bazel_build.log
           ls -la bazel-bin/kernel_device_modules-6.12/ 2>/dev/null | head -10 | tee -a ../bazel_build.log
           if grep -qE "ERROR:" ../bazel_build.log; then echo BUILD_FAILED; exit 1; fi
 
