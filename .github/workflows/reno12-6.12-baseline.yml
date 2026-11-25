@@ -99,6 +99,23 @@ jobs:
           if [ -n "$S" ] && [ -d "$S" ]; then cp -a "$S" kernel/build/build-tools/sysroot; fi
           set -e
           ls kernel/external | head -15
+      - name: A4b tree provenance
+        run: |
+          cd $RUNNER_TEMP/ws
+          set +e
+          {
+            echo '--- layout ---'
+            ls -ld kernel kernel-6.12 kernel_platform/common kernel/kernel_device_modules-6.12
+            echo '--- md5 of patch file in each tree ---'
+            md5sum kernel-6.12/arch/arm64/kernel/mtk_embed_dtb.c 2>/dev/null
+            md5sum kernel_platform/common/arch/arm64/kernel/mtk_embed_dtb.c 2>/dev/null
+            echo '--- does the built tree have the Kconfig symbol ---'
+            grep -c MTK_EMBED_BOARD_DTB kernel-6.12/arch/arm64/Kconfig
+            grep -c MTK_EMBED_BOARD_DTB kernel_platform/common/arch/arm64/Kconfig
+            echo '--- defconfig files ---'
+            find . -maxdepth 4 -name mgk_64_k612_defconfig 2>/dev/null
+          } 2>&1 | tee a4b.log
+          exit 0
       - name: A5 apply qqcandy v3c patch + embed DTB
         if: always()
         run: |
