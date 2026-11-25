@@ -82,6 +82,10 @@ jobs:
           # bazel.py wants <ws>/kernel/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel
           ln -sfn "$PWD/kernel_platform/prebuilts/kernel-build-tools" kernel/prebuilts/kernel-build-tools
           ls -l kernel/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel 2>/dev/null | tee -a find_musl.log             || echo "BAZEL_BIN_MISSING" | tee -a find_musl.log
+          # kleaf resolves local_repository("external/<x>") relative to the workspace root (kernel/)
+          mkdir -p kernel/external
+          for d in kernel_platform/external/*; do ln -sfn "$PWD/$d" "kernel/external/$(basename $d)"; done
+          ls kernel/external | head -20 | tee -a find_musl.log
 
       - name: B0 bazel query
         run: |
