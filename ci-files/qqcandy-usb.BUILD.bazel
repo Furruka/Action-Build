@@ -1,0 +1,68 @@
+# Copy this file to qqcandy_usb/BUILD.bazel under the synchronized kernel
+# workspace. Build //qqcandy_usb:qqcandy_usb_modules_install alongside
+# //kernel_device_modules-6.12:mgk_64_k612_kernel_aarch64.user with identical
+# Kleaf flags and defconfig fragments.
+
+load("//build/kernel/kleaf:kernel.bzl", "kernel_modules_install")
+
+_DEVICE_MODULES = "//kernel_device_modules-6.12"
+_VARIANT = ".mgk_64_k612.6.12.user"
+
+# USB0 device mode and the MT6895 hardware suppliers in the board DT.
+_USB_AND_SUPPLIERS = [
+    "drivers/clk/mediatek:clk-mt6895",
+    "drivers/clk/mediatek:clk-mt6895-bus",
+    "drivers/clk/mediatek:clk-mt6895-peri",
+    "drivers/i2c/busses:i2c-mt65xx",
+    "drivers/mfd:mt6375",
+    "drivers/mfd:mtk-spmi-pmic",
+    "drivers/misc/mediatek/extcon:extcon-mtk-usb",
+    "drivers/misc/mediatek/typec/tcpc:tcpc_mt6375",
+    "drivers/misc/mediatek/usb/usb_xhci:xhci-mtk-hcd-v2",
+    "drivers/nvmem:nvmem_mtk-devinfo",
+    "drivers/phy/mediatek:phy-mtk-xsphy",
+    "drivers/pinctrl/mediatek:pinctrl-mt6895",
+    "drivers/power/supply:mt6375-charger",
+    "drivers/regulator:mt6315-regulator",
+    "drivers/regulator:mt6363-regulator",
+    "drivers/regulator:mt6368-regulator",
+    "drivers/spmi:spmi-mtk-pmif",
+    "drivers/usb/mtu3:mtu3",
+]
+
+# Kleaf stages each listed module's own output. Include the DDK ko_deps
+# explicitly so depmod sees the providers as well as the USB drivers.
+_DDK_DEPENDENCIES = [
+    "drivers/clk/mediatek:clk-common",
+    "drivers/mfd:mtk-spmi-pmic-debug",
+    "drivers/misc/mediatek/aee/aed:aee_aed",
+    "drivers/misc/mediatek/aee/mrdump:mrdump",
+    "drivers/misc/mediatek/irq_monitor:irq_monitor",
+    "drivers/misc/mediatek/power_throttling:pmic_lbat_service",
+    "drivers/misc/mediatek/typec/tcpc:pd_dbg_info",
+    "drivers/misc/mediatek/typec/tcpc:tcpc_class",
+    "drivers/pinctrl/mediatek:pinctrl-mtk-common-v2_debug",
+    "drivers/pinctrl/mediatek:pinctrl-mtk-v2",
+    "drivers/power/supply:adapter_class",
+    "drivers/power/supply:charger_class",
+    "drivers/power/supply:mtk_battery_manager",
+    "drivers/power/supply:mtk_charger_algorithm_class",
+    "drivers/power/supply:mtk_charger_framework",
+    "drivers/power/supply:mtk_chg_type_det",
+]
+
+kernel_modules_install(
+    name = "qqcandy_usb_modules_install",
+    kernel_build = _DEVICE_MODULES + ":mgk_64_k612.user",
+    kernel_modules = [
+        _DEVICE_MODULES + "/" + module + _VARIANT
+        for module in _USB_AND_SUPPLIERS + _DDK_DEPENDENCIES
+    ],
+    outs = [
+        "modules.alias",
+        "modules.builtin",
+        "modules.dep",
+        "modules.softdep",
+        "modules.symbols",
+    ],
+)

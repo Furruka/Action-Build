@@ -1,0 +1,317 @@
+diff --git a/arch/arm64/kernel/mtk_embed_dtb.c b/arch/arm64/kernel/mtk_embed_dtb.c
+index 1a8e01e..4892ff7 100644
+--- a/arch/arm64/kernel/mtk_embed_dtb.c
++++ b/arch/arm64/kernel/mtk_embed_dtb.c
+@@ -14,7 +14,7 @@
+ #include <linux/string.h>
+ #include <linux/sysfs.h>
+ 
+-#include <asm/setup.h>
++#include <asm/memory.h>
+ 
+ #include "mtk_embed_dtb.h"
+ #include "mtk_embed_merge.h"
+@@ -89,20 +89,28 @@ void __init mtk_embed_dtb_early_init(void)
+ 	mtk_save_lk_fdt(lk_fdt);
+ 	pr_info("MTK-DTB: blob %zu bytes, buffer %zu\n", emb_size, sizeof(board_fdt));
+ 
+-	if (!emb_size || emb_size + MTK_FDT_HEADROOM > sizeof(board_fdt)) {
++	if (emb_size < sizeof(struct fdt_header) ||
++	    emb_size > sizeof(board_fdt) - MTK_FDT_HEADROOM) {
+ 		pr_err("MTK-DTB: blob does not fit, keeping LK FDT\n");
+ 		return;
+ 	}
+ 	memcpy(board_fdt, emb, emb_size);
++	if (fdt_check_header(board_fdt) || fdt_totalsize(board_fdt) > emb_size) {
++		pr_err("MTK-DTB: invalid embedded blob, keeping LK FDT\n");
++		return;
++	}
++
+ 	ret = mfdt_merge(board_fdt, lk_fdt, sizeof(board_fdt), &st);
+ 	if (ret) {
+ 		pr_err("MTK-DTB: merge failed %d, keeping LK FDT\n", ret);
+ 		return;
+ 	}
+-	pr_info("MTK-DTB: merged added=%d failed=%d remapped=%d\n",
+-		st.added, st.failed, st.remapped);
++	/* The LK scan already supplied bootargs, the initrd, and memblock. */
++	if (!early_init_dt_verify(board_fdt, __pa_symbol(board_fdt))) {
++		pr_err("MTK-DTB: invalid merged blob, keeping LK FDT\n");
++		return;
++	}
+ 
+-	initial_boot_params = board_fdt;
+-	early_init_dt_scan_chosen(boot_command_line);
+-	pr_info("MTK-DTB: runtime tree = embedded; cmdline=%s\n", boot_command_line);
++	pr_info("MTK-DTB: runtime tree = embedded; added=%d failed=%d remapped=%d\n",
++		st.added, st.failed, st.remapped);
+ }
+diff --git a/arch/arm64/kernel/mtk_embed_merge.c b/arch/arm64/kernel/mtk_embed_merge.c
+index fa592c4..24dcfad 100644
+--- a/arch/arm64/kernel/mtk_embed_merge.c
++++ b/arch/arm64/kernel/mtk_embed_merge.c
+@@ -12,13 +12,6 @@
+ #include <linux/string.h>
+ #include <linux/kernel.h>
+ 
+-#ifndef __KERNEL__
+-#include <stdio.h>
+-#define mfdt_warn(...) printf(__VA_ARGS__)
+-#else
+-#define mfdt_warn(fmt, ...) pr_warn("mfdt: " fmt, ##__VA_ARGS__)
+-#endif
+-
+ #include "mtk_embed_merge.h"
+ 
+ #define MFDT_MAX_MAP 128
+@@ -51,73 +44,83 @@ struct mfdt_ctx {
+ 	uint32_t next_ph;
+ 	int added;
+ 	int failed;
++	int error;
+ 	struct mfdt_touch touch[MFDT_MAX_TOUCH];
+ 	int ntouch;
+ };
+ 
++static int mfdt_status(struct mfdt_ctx *c, int ret)
++{
++	if (ret) {
++		if (!c->error)
++			c->error = ret;
++		c->failed++;
++	}
++	return ret;
++}
++
+ static void mfdt_record(struct mfdt_ctx *c, int off, const char *name);
+ 
+ static int mfdt_copy_props(struct mfdt_ctx *c, int lk_off, int d_off, bool skip_phandle)
+ {
+-	int poff, len, ret = 0;
++	int poff, len, ret;
+ 	const char *name;
+ 
+ 	fdt_for_each_property_offset(poff, c->lk, lk_off) {
+ 		const void *val = fdt_getprop_by_offset(c->lk, poff, &name, &len);
+ 
+-		if (!val || len < 0)
+-			continue;
++		if (!val)
++			return mfdt_status(c, len);
+ 		if (skip_phandle && (!strcmp(name, "phandle") || !strcmp(name, "linux,phandle")))
+ 			continue;
+-		if (fdt_setprop(c->dst, d_off, name, val, len))
+-			ret = -1;
+-		else if (mfdt_is_refprop(name)) {
++		ret = mfdt_status(c, fdt_setprop(c->dst, d_off, name, val, len));
++		if (ret)
++			return ret;
++		if (mfdt_is_refprop(name))
+ 			mfdt_record(c, d_off, name);
+-		}
+ 	}
+-	return ret;
++	return poff == -FDT_ERR_NOTFOUND ? 0 : mfdt_status(c, poff);
+ }
+ 
+-/* allocate a phandle that does not collide with anything already in dst */
+ static void mfdt_record(struct mfdt_ctx *c, int off, const char *name)
+ {
+-	if (c->ntouch >= MFDT_MAX_TOUCH || strlen(name) >= sizeof(c->touch[0].name))
++	if (c->ntouch >= MFDT_MAX_TOUCH || strlen(name) >= sizeof(c->touch[0].name)) {
++		mfdt_status(c, -FDT_ERR_NOSPACE);
+ 		return;
+-	if (fdt_get_path(c->dst, off, c->touch[c->ntouch].path, sizeof(c->touch[0].path)))
++	}
++	if (mfdt_status(c, fdt_get_path(c->dst, off, c->touch[c->ntouch].path,
++					sizeof(c->touch[0].path))))
+ 		return;
+ 	strcpy(c->touch[c->ntouch].name, name);
+ 	c->ntouch++;
+ }
+ 
+-static uint32_t mfdt_new_phandle(struct mfdt_ctx *c)
+-{
+-	while (fdt_node_offset_by_phandle(c->dst, (int)c->next_ph) >= 0)
+-		c->next_ph++;
+-	return c->next_ph++;
+-}
+-
+ static int mfdt_copy_node(struct mfdt_ctx *c, int lk_off, int d_parent, const char *name)
+ {
+-	int d_off, ph, ret;
++	int d_off, ret;
++	uint32_t ph;
+ 
+ 	d_off = fdt_add_subnode(c->dst, d_parent, name);
+-	if (d_off < 0) {
+-		c->failed++;
+-		return d_off;
+-	}
+-	if (mfdt_copy_props(c, lk_off, d_off, true)) {
+-		c->failed++;
+-		return -1;
+-	}
++	if (d_off < 0)
++		return mfdt_status(c, d_off);
++	ret = mfdt_copy_props(c, lk_off, d_off, true);
++	if (ret)
++		return ret;
+ 	ph = fdt_get_phandle(c->lk, lk_off);
+-	if (ph > 0 && c->nmap < MFDT_MAX_MAP) {
+-		uint32_t newph = mfdt_new_phandle(c);
+-
+-		if (!fdt_setprop_u32(c->dst, d_off, "phandle", newph)) {
+-			c->map[c->nmap].old_ph = (uint32_t)ph;
+-			c->map[c->nmap].new_ph = newph;
+-			c->nmap++;
+-		}
++	if (ph) {
++		uint32_t newph;
++
++		if (c->nmap >= MFDT_MAX_MAP)
++			return mfdt_status(c, -FDT_ERR_NOSPACE);
++		if (c->next_ph > FDT_MAX_PHANDLE)
++			return mfdt_status(c, -FDT_ERR_NOPHANDLES);
++		newph = c->next_ph++;
++		ret = mfdt_status(c, fdt_setprop_u32(c->dst, d_off, "phandle", newph));
++		if (ret)
++			return ret;
++		c->map[c->nmap].old_ph = ph;
++		c->map[c->nmap].new_ph = newph;
++		c->nmap++;
+ 	}
+ 	/* copy children of this node recursively (plain properties only) */
+ 	{
+@@ -152,13 +155,17 @@ static void mfdt_fixup_refs(struct mfdt_ctx *c)
+ 			if (strcmp(c->touch[t].name, refprops[i]))
+ 				continue;
+ 			d2 = fdt_path_offset(c->dst, c->touch[t].path);
+-			if (d2 < 0)
++			if (d2 < 0) {
++				mfdt_status(c, d2);
+ 				continue;
++			}
+ 			val = fdt_getprop(c->dst, d2, refprops[i], &len);
+-			if (!val || len < 4 || len % 4)
++			if (!val || len < 4 || len % 4) {
++				mfdt_status(c, val ? -FDT_ERR_BADVALUE : len);
+ 				continue;
++			}
+ 			if (len / 4 > (int)(sizeof(out) / sizeof(out[0]))) {
+-				mfdt_warn("fixup: %s too long (%d bytes), skipped\n", refprops[i], len);
++				mfdt_status(c, -FDT_ERR_NOSPACE);
+ 				continue;
+ 			}
+ 			for (j = 0; j < len / 4; j++) {
+@@ -177,7 +184,7 @@ static void mfdt_fixup_refs(struct mfdt_ctx *c)
+ 
+ 				for (j = 0; j < len / 4; j++)
+ 					be[j] = cpu_to_fdt32(out[j]);
+-				fdt_setprop(c->dst, d2, refprops[i], be, len);
++				mfdt_status(c, fdt_setprop(c->dst, d2, refprops[i], be, len));
+ 			}
+ 		}
+ 	}
+@@ -194,7 +201,7 @@ static int mfdt_merge_reserved(struct mfdt_ctx *c)
+ 	if (d_rm < 0) {
+ 		d_rm = fdt_add_subnode(c->dst, 0, "reserved-memory");
+ 		if (d_rm < 0)
+-			return d_rm;
++			return mfdt_status(c, d_rm);
+ 	}
+ 	fdt_for_each_subnode(child, c->lk, lk_rm) {
+ 		const char *name = fdt_get_name(c->lk, child, NULL);
+@@ -233,7 +240,7 @@ static void mfdt_merge_memregions(struct mfdt_ctx *c)
+ 		if (d < 0)
+ 			continue;
+ 		if (!fdt_getprop(c->dst, d, "memory-region", NULL)) {
+-			if (!fdt_setprop(c->dst, d, "memory-region", mr, len))
++			if (!mfdt_status(c, fdt_setprop(c->dst, d, "memory-region", mr, len)))
+ 				mfdt_record(c, d, "memory-region");
+ 		}
+ 	}
+@@ -253,7 +260,7 @@ static int mfdt_merge_memory(struct mfdt_ctx *c)
+ 		const void *v = fdt_getprop(c->lk, lk, props[i], &len);
+ 
+ 		if (v)
+-			fdt_setprop(c->dst, d, props[i], v, len);
++			mfdt_status(c, fdt_setprop(c->dst, d, props[i], v, len));
+ 	}
+ 	return 0;
+ }
+@@ -269,7 +276,7 @@ static int mfdt_merge_chosen(struct mfdt_ctx *c)
+ 	if (d < 0) {
+ 		d = fdt_add_subnode(c->dst, 0, "chosen");
+ 		if (d < 0)
+-			return d;
++			return mfdt_status(c, d);
+ 	}
+ 	fdt_for_each_property_offset(poff, c->lk, lk) {
+ 		const char *name;
+@@ -283,7 +290,7 @@ static int mfdt_merge_chosen(struct mfdt_ctx *c)
+ 		if (!strcmp(name, "stdout-path") || !strcmp(name, "linux,stdout-path") ||
+ 		    !strcmp(name, "phandle") || !strcmp(name, "linux,phandle"))
+ 			continue;
+-		fdt_setprop(c->dst, d, name, v, len);
++		mfdt_status(c, fdt_setprop(c->dst, d, name, v, len));
+ 	}
+ 	return 0;
+ }
+@@ -304,7 +311,7 @@ static int mfdt_merge_node_props(struct mfdt_ctx *c, const char *path)
+ 		v = fdt_getprop_by_offset(c->lk, poff, &name, &len);
+ 		if (!v || len < 0 || !strcmp(name, "phandle") || !strcmp(name, "linux,phandle"))
+ 			continue;
+-		fdt_setprop(c->dst, d, name, v, len);
++		mfdt_status(c, fdt_setprop(c->dst, d, name, v, len));
+ 	}
+ 	return 0;
+ }
+@@ -327,13 +334,17 @@ static void mfdt_copy_whole(struct mfdt_ctx *c, const char *path)
+ 			char pbuf[128];
+ 			size_t n = slash - path;
+ 
+-			if (n >= sizeof(pbuf))
++			if (n >= sizeof(pbuf)) {
++				mfdt_status(c, -FDT_ERR_NOSPACE);
+ 				return;
++			}
+ 			memcpy(pbuf, path, n);
+ 			pbuf[n] = 0;
+ 			parent = fdt_path_offset(c->dst, pbuf);
+-			if (parent < 0)
+-				parent = 0;
++			if (parent < 0) {
++				mfdt_status(c, parent);
++				return;
++			}
+ 		}
+ 		mfdt_copy_node(c, lk, parent, slash ? slash + 1 : path);
+ 	} else {
+@@ -364,6 +375,8 @@ int __init mfdt_merge(void *dst, const void *lk, size_t capacity, struct mfdt_st
+ 		if (ph > maxph)
+ 			maxph = ph;
+ 	}
++	if (maxph > FDT_MAX_PHANDLE)
++		return -FDT_ERR_BADPHANDLE;
+ 	c->next_ph = maxph + 1;
+ 
+ 	mfdt_merge_memory(c);
+@@ -376,11 +389,15 @@ int __init mfdt_merge(void *dst, const void *lk, size_t capacity, struct mfdt_st
+ 	mfdt_copy_whole(c, "/firmware/android");
+ 	mfdt_fixup_refs(c);
+ 
+-	ret = fdt_pack(dst);
++	ret = c->error;
++	if (!ret)
++		ret = fdt_pack(dst);
++	if (!ret)
++		ret = fdt_check_header(dst);
+ 	if (st) {
+ 		st->added = c->added;
+ 		st->failed = c->failed;
+ 		st->remapped = c->nmap;
+ 	}
+-	return ret ? -3 : 0;
++	return ret;
+ }

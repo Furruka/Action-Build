@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 350
     env:
       KERNEL_VERSION: kernel-6.12
+      KLEAF_VERSION_FLAG: --//build/bazel_mgk_rules:kernel_version=6.12
+      KLEAF_EMBED_FLAG: --//build/kernel/kleaf:defconfig_fragment=//kernel_device_modules-6.12:kernel/configs/qqcandy-embed.config
     defaults:
       run:
         shell: bash
@@ -28,7 +30,7 @@ jobs:
         run: |
           set -o pipefail
           nproc; free -g | head -2; df -h / | tail -1
-          sudo apt-get update -qq && sudo apt-get install -y -qq git python3 curl unzip zip
+          sudo apt-get update -qq && sudo apt-get install -y -qq git python3 curl unzip zip kmod
           mkdir -p ~/bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod +x ~/bin/repo; echo "$HOME/bin" >> $GITHUB_PATH
@@ -97,7 +99,7 @@ jobs:
             cp -a "$sysroot" "$build_tools/sysroot"
           done
           ls kernel/external | head -15
-      - name: A5 apply qqcandy v3d to the Kleaf source tree
+      - name: A5 apply qqcandy patches to the Kleaf source tree
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/ws"
@@ -105,14 +107,17 @@ jobs:
           core="$(realpath -e kernel/kernel-6.12)"
           modules="$(realpath -e kernel/kernel_device_modules-6.12)"
           patch="$GITHUB_WORKSPACE/ci-patches/0001-v3d.patch"
+          fdt_fix="$GITHUB_WORKSPACE/ci-patches/0002-v3e-fdt-state.patch"
           fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
           printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
           git -C "$core" rev-parse HEAD
           git -C "$modules" rev-parse HEAD
           test "$(realpath -e "$(git -C "$core" rev-parse --show-toplevel)")" = "$core"
-          sha256sum "$patch" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
+          sha256sum "$patch" "$fdt_fix" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
           git -C "$core" apply --check --verbose "$patch"
           git -C "$core" apply --verbose "$patch"
+          git -C "$core" apply --check --verbose "$fdt_fix"
+          git -C "$core" apply --verbose "$fdt_fix"
           git -C "$core" status --short
           grep -F 'static struct mfdt_ctx ctx __initdata' "$core/arch/arm64/kernel/mtk_embed_merge.c"
           grep -Fx 'config MTK_EMBED_BOARD_DTB' "$core/arch/arm64/Kconfig"
@@ -129,10 +134,7 @@ jobs:
           package=kernel_device_modules-6.12
           image_target=mgk_64_k612_kernel_aarch64.user
           target="//$package:$image_target"
-          flags=(
-            --//build/bazel_mgk_rules:kernel_version=6.12
-            "--//build/kernel/kleaf:defconfig_fragment=//$package:kernel/configs/qqcandy-embed.config"
-          )
+          flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG")
           printf 'Target: %s\nBazel option: %s\n' "$target" "${flags[@]}"
 
           config_action='inputs(".*qqcandy-embed[.]config", mnemonic("^KernelConfig$", '
@@ -167,12 +169,60 @@ jobs:
           grep -q ' _binary_arch_arm64_kernel_board_embed_dtb_start$' ../vmlinux_symbols.log
           grep -q ' _binary_arch_arm64_kernel_board_embed_dtb_end$' ../vmlinux_symbols.log
 
+      - name: upload verified Images
+        uses: actions/upload-artifact@v4
+        with:
+          name: reno12-images
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/ws/kernel/bazel-bin/kernel_device_modules-6.12/mgk_64_k612_kernel_aarch64.user/Image*
+
+      - name: D build the same-kernel USB modules and run depmod
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/ws/kernel"
+          flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG")
+          usb_target=//qqcandy_usb:qqcandy_usb_modules_install
+          device_target=//kernel_device_modules-6.12:mgk_64_k612.user
+          mkdir -p qqcandy_usb
+          install -m 644 "$GITHUB_WORKSPACE/ci-files/qqcandy-usb.BUILD.bazel" qqcandy_usb/BUILD.bazel
+          ./tools/bazel build "${flags[@]}" "$usb_target" 2>&1 | tee ../usb_build.log
+          if grep -iE 'needs unknown symbol|disagrees about version|depmod: ERROR' ../usb_build.log; then
+            echo 'The USB module set has unresolved symbols' >&2
+            exit 1
+          fi
+          ./tools/bazel cquery "${flags[@]}" --output=files "$usb_target" | tee ../usb_outputs.log
+          deps="$(awk '/\/qqcandy_usb\/qqcandy_usb_modules_install\/modules[.]dep$/ {print}' ../usb_outputs.log)"
+          test -s "$deps"
+          ./tools/bazel cquery "${flags[@]}" --output_groups=+modules_staging_archive --output=files "$device_target" | tee ../device_outputs.log
+          base_archive="$(awk '/\/mgk_64_k612[.]user\/modules_staging_dir[.]tar[.]gz$/ {print}' ../device_outputs.log)"
+          test -s "$base_archive"
+          stage=../qqcandy-recovery-modules
+          mkdir -p "$stage"
+          cp -L -- "$(dirname "$deps")"/*.ko "$(dirname "$deps")"/modules.* "$base_archive" "$stage/"
+          tar tf "$stage/modules_staging_dir.tar.gz" > ../device_archive_files.log
+          release="$(sed -E 's|^[.]/||' ../device_archive_files.log | awk -F/ '$1 == "lib" && $2 == "modules" && $3 != "" {print $3}' | sort -u)"
+          test -n "$release"
+          for module in "$stage"/*.ko; do
+            vermagic="$(modinfo -F vermagic "$module")"
+            printf '%s %s\n' "$(basename "$module")" "$vermagic"
+            test "${vermagic%% *}" = "$release"
+          done | tee ../usb_vermagic.log
+          sha256sum "$stage"/* | tee ../usb_sha256.log
+
+      - name: upload USB build inputs for recovery packaging
+        uses: actions/upload-artifact@v4
+        with:
+          name: qqcandy-recovery-modules
+          if-no-files-found: error
+          path: ${{ runner.temp }}/ws/qqcandy-recovery-modules/
+
       - name: first error extraction
         if: always()
         run: |
           cd $RUNNER_TEMP/ws || exit 0
           : > first_error.log
-          for f in sync.log a5.log config_build.log bazel_build.log; do
+          for f in sync.log a5.log config_build.log bazel_build.log usb_build.log; do
             [ -f "$f" ] || continue
             echo "### $f" >> first_error.log
             if match="$(grep -n -m1 -iE 'No such file|error:|couldn.t find|FAILED:' "$f")"; then
@@ -193,10 +243,3 @@ jobs:
           path: |
             ${{ runner.temp }}/ws/*.log
             ${{ runner.temp }}/ws/kernel-config.txt
-
-      - name: upload verified Images
-        uses: actions/upload-artifact@v4
-        with:
-          name: reno12-images
-          path: |
-            ${{ runner.temp }}/ws/kernel/bazel-bin/kernel_device_modules-6.12/mgk_64_k612_kernel_aarch64.user/Image*
