@@ -177,8 +177,13 @@ jobs:
           for f in sync.log a5.log config_build.log bazel_build.log; do
             [ -f "$f" ] || continue
             echo "### $f" >> first_error.log
-            ln=$(grep -n -m1 -iE "No such file|ERROR:|error:|couldn.t find|FAILED:" "$f" | cut -d: -f1)
-            if [ -n "$ln" ]; then s=$((ln-10)); [ $s -lt 1 ] && s=1; sed -n "${s},$((ln+20))p" "$f" >> first_error.log; else echo "(none)" >> first_error.log; fi
+            if match="$(grep -n -m1 -iE 'No such file|error:|couldn.t find|FAILED:' "$f")"; then
+              line_number=${match%%:*}
+              start=$((line_number > 10 ? line_number - 10 : 1))
+              sed -n "${start},$((line_number + 20))p" "$f" >> first_error.log
+            else
+              echo "(none)" >> first_error.log
+            fi
           done
           cat first_error.log
 
