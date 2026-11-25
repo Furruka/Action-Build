@@ -35,13 +35,13 @@ jobs:
           mkdir -p $RUNNER_TEMP/ws && cd $RUNNER_TEMP/ws
           repo init -u https://github.com/Numbersf/Kernel_Manifest_Appendix -b oppo/mt6896 -m oppo_reno12_b.xml --depth=1 --no-repo-verify 2>&1 | tail -5
           mkdir -p .repo/local_manifests
-          cat > .repo/local_manifests/remove-bad.xml <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<manifest>
-  <remove-project name="kernel_platform/prebuilts/asuite" />
-  <remove-project name="kernel_platform/tools/tradefederation/prebuilts" />
-</manifest>
-EOF
+          {
+            echo '<?xml version="1.0" encoding="UTF-8"?>'
+            echo '<manifest>'
+            echo '  <remove-project name="kernel_platform/prebuilts/asuite" />'
+            echo '  <remove-project name="kernel_platform/tools/tradefederation/prebuilts" />'
+            echo '</manifest>'
+          } > .repo/local_manifests/remove-bad.xml
           cat .repo/local_manifests/remove-bad.xml
 
       - name: A2 sync
