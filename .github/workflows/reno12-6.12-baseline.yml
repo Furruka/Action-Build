@@ -88,16 +88,14 @@ jobs:
           ls kernel/prebuilts | head -20
           ls -l kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd 2>/dev/null || echo NO_MUSL
           ls -l kernel/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel 2>/dev/null || echo NO_BAZEL_BIN
-          set +e
-          S=$(find $PWD/kernel_platform -maxdepth 7 -type d -name sysroot 2>/dev/null | head -1)
-          echo "sysroot source: $S"
-          mkdir -p kernel/build/kernel/build-tools
-          rm -rf kernel/build/kernel/build-tools/sysroot
-          if [ -n "$S" ] && [ -d "$S" ]; then cp -a "$S" kernel/build/kernel/build-tools/sysroot; else echo NO_SYSROOT; fi
-          mkdir -p kernel/build/build-tools
-          rm -rf kernel/build/build-tools/sysroot
-          if [ -n "$S" ] && [ -d "$S" ]; then cp -a "$S" kernel/build/build-tools/sysroot; fi
-          set -e
+          sysroot="$PWD/kernel_platform/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8/sysroot"
+          echo "Host glibc sysroot: $sysroot"
+          test -r "$sysroot/usr/include/linux/types.h"
+          for build_tools in kernel/build/kernel/build-tools kernel/build/build-tools; do
+            mkdir -p "$build_tools"
+            rm -rf "$build_tools/sysroot"
+            cp -a "$sysroot" "$build_tools/sysroot"
+          done
           ls kernel/external | head -15
       - name: A5 apply qqcandy v3d to the Kleaf source tree
         run: |
