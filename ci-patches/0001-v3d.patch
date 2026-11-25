@@ -210,7 +210,7 @@ diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_dtb.h b/arch/arm64/kernel/mtk_e
 diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_merge.c b/arch/arm64/kernel/mtk_embed_merge.c
 --- a/arch/arm64/kernel/mtk_embed_merge.c	1970-01-01 08:00:00
 +++ b/arch/arm64/kernel/mtk_embed_merge.c	2026-11-25 20:29:38
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,386 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * mfdt_merge - merge the LK handoff tree into an embedded board tree.
@@ -219,6 +219,7 @@ diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_merge.c b/arch/arm64/kernel/mtk
 + * compiled and fuzzed on the host (see host_test.c) and linked into the
 + * kernel. Only libfdt is required.
 + */
++#include <linux/init.h>
 +#include <linux/types.h>
 +
 +#include <linux/string.h>
@@ -553,9 +554,11 @@ diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_merge.c b/arch/arm64/kernel/mtk
 +	}
 +}
 +
-+int mfdt_merge(void *dst, const void *lk, size_t capacity, struct mfdt_stats *st)
++int __init mfdt_merge(void *dst, const void *lk, size_t capacity, struct mfdt_stats *st)
 +{
-+	struct mfdt_ctx c;
++	/* The context is too large for the early boot stack. */
++	static struct mfdt_ctx ctx __initdata = { };
++	struct mfdt_ctx *c = &ctx;
 +	uint32_t maxph = 1;
 +	int off, ret;
 +
@@ -564,9 +567,9 @@ diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_merge.c b/arch/arm64/kernel/mtk
 +	if (fdt_open_into(dst, dst, capacity))
 +		return -2;
 +
-+	memset(&c, 0, sizeof(c));
-+	c.dst = dst;
-+	c.lk = lk;
++	memset(c, 0, sizeof(*c));
++	c->dst = dst;
++	c->lk = lk;
 +
 +	for (off = 0; off >= 0; off = fdt_next_node(dst, off, NULL)) {
 +		uint32_t ph = fdt_get_phandle(dst, off);
@@ -574,23 +577,23 @@ diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_merge.c b/arch/arm64/kernel/mtk
 +		if (ph > maxph)
 +			maxph = ph;
 +	}
-+	c.next_ph = maxph + 1;
++	c->next_ph = maxph + 1;
 +
-+	mfdt_merge_memory(&c);
-+	mfdt_merge_chosen(&c);
-+	mfdt_merge_node_props(&c, "/soc/mddriver");
-+	mfdt_merge_reserved(&c);
-+	mfdt_merge_memregions(&c);
-+	mfdt_copy_whole(&c, "/bootprof");
-+	mfdt_copy_whole(&c, "/debug-kinfo");
-+	mfdt_copy_whole(&c, "/firmware/android");
-+	mfdt_fixup_refs(&c);
++	mfdt_merge_memory(c);
++	mfdt_merge_chosen(c);
++	mfdt_merge_node_props(c, "/soc/mddriver");
++	mfdt_merge_reserved(c);
++	mfdt_merge_memregions(c);
++	mfdt_copy_whole(c, "/bootprof");
++	mfdt_copy_whole(c, "/debug-kinfo");
++	mfdt_copy_whole(c, "/firmware/android");
++	mfdt_fixup_refs(c);
 +
 +	ret = fdt_pack(dst);
 +	if (st) {
-+		st->added = c.added;
-+		st->failed = c.failed;
-+		st->remapped = c.nmap;
++		st->added = c->added;
++		st->failed = c->failed;
++		st->remapped = c->nmap;
 +	}
 +	return ret ? -3 : 0;
 +}

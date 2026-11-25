@@ -99,98 +99,82 @@ jobs:
           if [ -n "$S" ] && [ -d "$S" ]; then cp -a "$S" kernel/build/build-tools/sysroot; fi
           set -e
           ls kernel/external | head -15
-      - name: A4b tree provenance
+      - name: A5 apply qqcandy v3d to the Kleaf source tree
         run: |
-          cd $RUNNER_TEMP/ws
-          set +e
-          {
-            echo '--- layout ---'
-            ls -ld kernel kernel-6.12 kernel_platform/common kernel/kernel_device_modules-6.12
-            echo '--- md5 of patch file in each tree ---'
-            md5sum kernel-6.12/arch/arm64/kernel/mtk_embed_dtb.c 2>/dev/null
-            md5sum kernel_platform/common/arch/arm64/kernel/mtk_embed_dtb.c 2>/dev/null
-            echo '--- does the built tree have the Kconfig symbol ---'
-            grep -c MTK_EMBED_BOARD_DTB kernel-6.12/arch/arm64/Kconfig
-            grep -c MTK_EMBED_BOARD_DTB kernel_platform/common/arch/arm64/Kconfig
-            echo '--- defconfig files ---'
-            find . -maxdepth 4 -name mgk_64_k612_defconfig 2>/dev/null
-          } 2>&1 | tee a4b.log
-          exit 0
-      - name: A5 apply qqcandy v3c patch + embed DTB
-        if: always()
-        run: |
-          cd $RUNNER_TEMP/ws || exit 1
-          : > a5.log
-          set +e
-          cp $GITHUB_WORKSPACE/ci-patches/0001-v3c.patch . 2>>a5.log; echo "cp_rc=$?" >> a5.log
-          ( cd kernel-6.12 && git apply --check ../0001-v3c.patch ) 2>>a5.log; echo "check_rc=$?" >> a5.log
-          ( cd kernel-6.12 && git apply ../0001-v3c.patch ) 2>>a5.log; echo "apply_rc=$?" >> a5.log
-          ( cd kernel-6.12 && git diff --stat ) 2>>a5.log
-          mkdir -p kernel-6.12/arch/arm64/boot/dts/mediatek
-          cp $GITHUB_WORKSPACE/ci-files/board-embed.dtb kernel-6.12/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb 2>>a5.log; echo "dtb_rc=$?" >> a5.log
-          ls -l kernel-6.12/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb >> a5.log 2>&1
-          {
-            echo 'CONFIG_MTK_EMBED_BOARD_DTB=y'
-            echo 'CONFIG_MTK_EMBED_BOARD_DTB_PATH="arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb"'
-            echo 'CONFIG_MTK_EMBED_DTB_LK_FDT_DUMP=y'
-            echo 'CONFIG_MTK_EMBED_DTB_LK_FDT_MAX_KB=1024'
-            echo 'CONFIG_USB_MTU3=y'
-            echo 'CONFIG_USB_GADGET=y'
-            echo 'CONFIG_USB_CONFIGFS=y'
-            echo 'CONFIG_USB_CONFIGFS_F_FS=y'
-            echo 'CONFIG_PSTORE=y'
-            echo 'CONFIG_PSTORE_RAM=y'
-          } > cfg.append; echo "cfgwrite_rc=$?" >> a5.log
-          cat cfg.append >> kernel/kernel_device_modules-6.12/arch/arm64/configs/mgk_64_k612_defconfig; echo "cfgappend_rc=$?" >> a5.log
-          set -e
-          cat a5.log
-          if grep -qE '_rc=[1-9]' a5.log; then echo 'A5 had failures'; exit 1; fi
-      - name: B0 bazel diag + query
-        run: |
-          set -o pipefail
-          cd $RUNNER_TEMP/ws/kernel
-          {
-            echo "--- workspace dotfiles ---"
-            ls -la | grep -E '\.bazel|WORKSPACE|MODULE' || true
-            echo "--- .bazelversion ---"; cat .bazelversion 2>/dev/null || echo NONE
-            echo "--- .bazelrc ---"; cat .bazelrc 2>/dev/null || echo NONE
-            echo "--- tools ---"; ls tools 2>/dev/null | head
-          } | tee ../bazel_diag.log
-          echo "--- bazel prebuilts versions ---" | tee -a ../bazel_diag.log
-          ls -l ../kernel_platform/prebuilts/kernel-build-tools/bazel/ 2>/dev/null | tail -5 | tee -a ../bazel_diag.log || true
-          echo "--- kernel/external ---" | tee -a ../bazel_diag.log
-          ls ../kernel/external 2>/dev/null | head -25 | tee -a ../bazel_diag.log || true
-          ./tools/bazel version 2>&1 | tee -a ../bazel_diag.log || true
-          FLAGS="--config=internet --enable_bzlmod --//build/bazel_mgk_rules:kernel_version=6.12 --repo_manifest=$PWD/kernel:$PWD/kernel/kernel_device_modules-6.12/fake_manifest.xml"
-          echo "official-flags: $FLAGS" | tee -a ../bazel_diag.log
-          ./tools/bazel query $FLAGS //kernel_device_modules-6.12:mgk_64_k612_customer_modules_install.user 2>&1 | tail -40 | tee ../bazel_query.log
-          if grep -qE "ERROR:|No such file|not defined" ../bazel_query.log; then echo QUERY_FAILED; exit 1; fi
-          echo QUERY_OK
+          set -euo pipefail
+          cd "$RUNNER_TEMP/ws"
+          exec > >(tee a5.log) 2>&1
+          core="$(realpath -e kernel/kernel-6.12)"
+          modules="$(realpath -e kernel/kernel_device_modules-6.12)"
+          patch="$GITHUB_WORKSPACE/ci-patches/0001-v3d.patch"
+          fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
+          printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
+          git -C "$core" rev-parse HEAD
+          git -C "$modules" rev-parse HEAD
+          test "$(realpath -e "$(git -C "$core" rev-parse --show-toplevel)")" = "$core"
+          sha256sum "$patch" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
+          git -C "$core" apply --check --verbose "$patch"
+          git -C "$core" apply --verbose "$patch"
+          git -C "$core" status --short
+          grep -F 'static struct mfdt_ctx ctx __initdata' "$core/arch/arm64/kernel/mtk_embed_merge.c"
+          grep -Fx 'config MTK_EMBED_BOARD_DTB' "$core/arch/arm64/Kconfig"
+          dtb="$core/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb"
+          install -D -m 644 "$GITHUB_WORKSPACE/ci-files/board-embed.dtb" "$dtb"
+          install -m 644 "$fragment" "$modules/kernel/configs/qqcandy-embed.config"
+          printf '\nexports_files(["kernel/configs/qqcandy-embed.config"])\n' >> "$modules/BUILD.bazel"
+          sha256sum "$core/arch/arm64/kernel/mtk_embed_merge.c" "$dtb"
 
-      - name: B1 nobuild
+      - name: B and C build configuration and verify the linked DTB
         run: |
-          set -o pipefail
-          cd $RUNNER_TEMP/ws/kernel
-          ./tools/bazel build $FLAGS --nobuild //kernel_device_modules-6.12:mgk_64_k612_kernel_aarch64.user 2>&1 | tail -120 | tee ../bazel_nobuild.log
-          if grep -qE "ERROR:|No such file" ../bazel_nobuild.log; then echo "NOBUILD_FAILED"; exit 1; fi
-          echo NOBUILD_OK
+          set -euo pipefail
+          cd "$RUNNER_TEMP/ws/kernel"
+          package=kernel_device_modules-6.12
+          image_target=mgk_64_k612_kernel_aarch64.user
+          target="//$package:$image_target"
+          flags=(
+            --//build/bazel_mgk_rules:kernel_version=6.12
+            "--//build/kernel/kleaf:defconfig_fragment=//$package:kernel/configs/qqcandy-embed.config"
+          )
+          printf 'Target: %s\nBazel option: %s\n' "$target" "${flags[@]}"
 
-      - name: C build
-        run: |
-          set -o pipefail
-          cd $RUNNER_TEMP/ws/kernel
-          ./tools/bazel build $FLAGS -k //kernel_device_modules-6.12:mgk_64_k612_kernel_aarch64.user 2>&1 | tail -200 | tee ../bazel_build.log
-          find bazel-bin/kernel_device_modules-6.12 -maxdepth 4 -name 'Image*' -type f -exec ls -l {} \; | tee ../image_list.log
-          find bazel-bin/kernel_device_modules-6.12 -maxdepth 4 -name 'Image*' -type f -exec md5sum {} \; | tee -a ../image_list.log
-          if ! grep -q 'Image' ../image_list.log; then echo 'NO_IMAGE_PRODUCED'; exit 1; fi
-          if grep -qE "ERROR:" ../bazel_build.log; then echo BUILD_FAILED; exit 1; fi
+          config_action='inputs(".*qqcandy-embed[.]config", mnemonic("^KernelConfig$", '
+          ./tools/bazel aquery "${flags[@]}" --include_artifacts=false \
+            "$config_action${target}_config))" | tee ../config_action.log
+          grep -F 'Mnemonic: KernelConfig' ../config_action.log
+
+          ./tools/bazel build "${flags[@]}" "${target}_config" 2>&1 | tee ../config_build.log
+          ./tools/bazel cquery "${flags[@]}" --output=files "${target}_config" | tee ../config_outputs.log
+          out_dir="$(awk -v suffix="/$package/${image_target}_config/out_dir" 'substr($0, 1 + length($0) - length(suffix)) == suffix' ../config_outputs.log)"
+          test -f "$out_dir/.config"
+          cp "$out_dir/.config" ../kernel-config.txt
+          grep -E '^(CONFIG_MTK_EMBED|CONFIG_ARCH_MEDIATEK|CONFIG_USB_(MTU3|XHCI_MTK|GADGET|CONFIGFS_F_FS)=|CONFIG_PSTORE_RAM=|# CONFIG_ARCH_MEDIATEK)' ../kernel-config.txt | tee ../config_symbols.log
+          while IFS= read -r setting; do
+            grep -Fx -- "$setting" ../kernel-config.txt
+          done < "$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
+
+          image_action='inputs(".*qqcandy-merged[.]dtb", mnemonic("^KernelBuild$", '
+          ./tools/bazel aquery "${flags[@]}" --include_artifacts=false \
+            "$image_action$target))" | tee ../image_action.log
+          grep -F 'Mnemonic: KernelBuild' ../image_action.log
+
+          ./tools/bazel build "${flags[@]}" "$target" 2>&1 | tee ../bazel_build.log
+          ./tools/bazel cquery "${flags[@]}" --output=files "$target" | tee ../image_outputs.log
+          image="$(awk -v suffix="/$package/$image_target/Image" 'substr($0, 1 + length($0) - length(suffix)) == suffix' ../image_outputs.log)"
+          test -f "$image"
+          vmlinux="$(dirname "$image")/vmlinux"
+          test -f "$vmlinux"
+          python3 "$GITHUB_WORKSPACE/ci-files/check_embed.py" "$image" \
+            "$GITHUB_WORKSPACE/ci-files/board-embed.dtb" | tee ../embed_check.log
+          nm "$vmlinux" | awk '$3 ~ /^_binary_arch_arm64_kernel_board_embed_dtb_(start|end)$/ {print}' | tee ../vmlinux_symbols.log
+          grep -q ' _binary_arch_arm64_kernel_board_embed_dtb_start$' ../vmlinux_symbols.log
+          grep -q ' _binary_arch_arm64_kernel_board_embed_dtb_end$' ../vmlinux_symbols.log
 
       - name: first error extraction
         if: always()
         run: |
           cd $RUNNER_TEMP/ws || exit 0
           : > first_error.log
-          for f in sync.log bazel_query.log bazel_nobuild.log bazel_build.log; do
+          for f in sync.log a5.log config_build.log bazel_build.log; do
             [ -f "$f" ] || continue
             echo "### $f" >> first_error.log
             ln=$(grep -n -m1 -iE "No such file|ERROR:|error:|couldn.t find|FAILED:" "$f" | cut -d: -f1)
@@ -205,14 +189,11 @@ jobs:
           name: reno12-logs
           path: |
             ${{ runner.temp }}/ws/*.log
-            ${{ runner.temp }}/ws/layout.log
+            ${{ runner.temp }}/ws/kernel-config.txt
 
-      - name: upload images
-        if: always()
-        continue-on-error: true
+      - name: upload verified Images
         uses: actions/upload-artifact@v4
         with:
           name: reno12-images
           path: |
-            ${{ runner.temp }}/ws/kernel/bazel-bin/kernel_device_modules-6.12/**/*.ko
-            ${{ runner.temp }}/ws/kernel/bazel-bin/kernel_device_modules-6.12/**/Image*
+            ${{ runner.temp }}/ws/kernel/bazel-bin/kernel_device_modules-6.12/mgk_64_k612_kernel_aarch64.user/Image*
