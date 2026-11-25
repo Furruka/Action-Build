@@ -71,7 +71,16 @@ jobs:
           set -eo pipefail
           cd $RUNNER_TEMP/ws
           mkdir -p kernel/prebuilts
-          ln -sfn "$PWD/kernel_platform/prebuilts/kernel-build-tools" kernel/prebuilts/build-tools
+          # find the project that actually ships linux_musl-x86/bin/py3-cmd
+          P=$(find kernel_platform/prebuilts -maxdepth 8 -type f -name py3-cmd 2>/dev/null | head -1)
+          echo "py3-cmd found at: $P"
+          if [ -n "$P" ]; then
+            D=${P%/linux_musl-x86/bin/py3-cmd}
+            ln -sfn "$PWD/$D" kernel/prebuilts/build-tools
+            echo "linked kernel/prebuilts/build-tools -> $D"
+          else
+            echo "PY3CMD_NOT_FOUND_ANYWHERE"; find kernel_platform/prebuilts -maxdepth 3 -type d | head -20
+          fi
           ln -sfn "$PWD/kernel_platform/prebuilts/clang/host/linux-x86" kernel/prebuilts/clang 2>/dev/null || true
           ls -l kernel/prebuilts/ | tee -a layout.log
           ls kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd 2>/dev/null && echo PY3CMD_OK || echo PY3CMD_MISSING
