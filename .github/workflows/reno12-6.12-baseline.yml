@@ -79,6 +79,9 @@ jobs:
           ln -sfn "$PWD/kernel_platform/prebuilts/build-tools/linux-x86" kernel/prebuilts/build-tools/linux_musl-x86
           ls -l kernel/prebuilts/build-tools/ | tee -a find_musl.log
           kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd -c 'print("PY3CMD_OK")' | tee -a find_musl.log
+          # bazel.py wants <ws>/kernel/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel
+          ln -sfn "$PWD/kernel_platform/prebuilts/kernel-build-tools" kernel/prebuilts/kernel-build-tools
+          ls -l kernel/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel 2>/dev/null | tee -a find_musl.log             || echo "BAZEL_BIN_MISSING" | tee -a find_musl.log
 
       - name: B0 bazel query
         run: |
