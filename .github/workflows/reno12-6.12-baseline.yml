@@ -66,24 +66,19 @@ jobs:
           done | tee layout.log
           find kernel_platform/prebuilts/kernel-build-tools -maxdepth 4 -name py3-cmd 2>/dev/null | head -3 | tee -a layout.log
 
-      - name: A4 link prebuilts where kleaf expects them
+      - name: A4 prebuilts musl shim
         run: |
           set -eo pipefail
           cd $RUNNER_TEMP/ws
-          mkdir -p kernel/prebuilts
-          # find the project that actually ships linux_musl-x86/bin/py3-cmd
-          P=$(find kernel_platform/prebuilts -maxdepth 8 -type f -name py3-cmd 2>/dev/null | head -1)
-          echo "py3-cmd found at: $P"
-          if [ -n "$P" ]; then
-            D=${P%/linux_musl-x86/bin/py3-cmd}
-            ln -sfn "$PWD/$D" kernel/prebuilts/build-tools
-            echo "linked kernel/prebuilts/build-tools -> $D"
-          else
-            echo "PY3CMD_NOT_FOUND_ANYWHERE"; find kernel_platform/prebuilts -maxdepth 3 -type d | head -20
-          fi
-          ln -sfn "$PWD/kernel_platform/prebuilts/clang/host/linux-x86" kernel/prebuilts/clang 2>/dev/null || true
-          ls -l kernel/prebuilts/ | tee -a layout.log
-          ls kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd 2>/dev/null && echo PY3CMD_OK || echo PY3CMD_MISSING
+          echo "--- dirs named linux_musl-x86 ---"
+          find $PWD -maxdepth 8 -type d -name linux_musl-x86 2>/dev/null | tee find_musl.log || true
+          echo "--- files named py3-cmd ---"
+          find $PWD -maxdepth 10 -type f -name py3-cmd 2>/dev/null | head -10 | tee -a find_musl.log
+          rm -rf kernel/prebuilts/build-tools
+          mkdir -p kernel/prebuilts/build-tools
+          ln -sfn "$PWD/kernel_platform/prebuilts/build-tools/linux-x86" kernel/prebuilts/build-tools/linux_musl-x86
+          ls -l kernel/prebuilts/build-tools/ | tee -a find_musl.log
+          kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd -c 'print("PY3CMD_OK")' | tee -a find_musl.log
 
       - name: B0 bazel query
         run: |
@@ -92,6 +87,8 @@ jobs:
           chmod +x tools/bazel 2>/dev/null || true
           ./tools/bazel --version 2>&1 | tail -3 || true
           ./tools/bazel query "kind(kernel_build, //...)" 2>&1 | tail -30 | tee ../bazel_query.log
+          if grep -qE "ERROR:|No such file|Not a directory|Traceback" ../bazel_query.log; then echo QUERY_FAILED; exit 1; fi
+          echo QUERY_OK
 
       - name: B1 nobuild
         run: |
