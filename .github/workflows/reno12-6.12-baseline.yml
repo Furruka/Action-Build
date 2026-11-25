@@ -1,0 +1,123 @@
+name: Reno12 6.12 baseline probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "A=sync+layout, B=bazel query, C=full build"
+        default: "A"
+
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: free disk
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/share/swift /usr/local/.ghcup /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo apt-get clean
+          df -h / | tail -1
+
+      - name: env
+        run: |
+          nproc; free -g | head -2; df -h / | tail -1
+          sudo apt-get update -qq && sudo apt-get install -y -qq git python3 curl
+
+      - name: install repo
+        run: |
+          mkdir -p ~/bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
+          chmod +x ~/bin/repo; echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: A1 repo init
+        run: |
+          mkdir -p $RUNNER_TEMP/ws && cd $RUNNER_TEMP/ws
+          repo init -u https://github.com/Numbersf/Kernel_Manifest_Appendix -b oppo/mt6896 -m oppo_reno12_b.xml --depth=1 --no-repo-verify 2>&1 | tail -20
+          ls .repo/manifests | head
+
+      - name: A2 repo sync
+        run: |
+          cd $RUNNER_TEMP/ws
+          set +e
+          repo sync -c -j8 --fail-fast --no-clone-bundle --no-tags 2>&1 | tee sync.log
+          df -h / | tail -1
+          du -sh . | tail -1
+
+      - name: A3 layout probe
+        run: |
+          cd $RUNNER_TEMP/ws
+          for p in kernel kernel-6.12 kernel_platform kernel_device_modules-6.12 \
+                   kernel/kernel_device_modules-6.12 \
+                   kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd \
+                   kernel_platform/prebuilts/clang/host/linux-x86 \
+                   kernel_platform/external/qcom-dtc \
+                   kernel_platform/common; do
+            [ -e "$p" ] && echo "EXIST   $p" || echo "MISSING $p"
+          done | tee layout.log
+
+      - name: B1 bazel query
+        if: ${{ inputs.stage != 'A' }}
+        run: |
+          cd $RUNNER_TEMP/ws/kernel 2>/dev/null || cd $RUNNER_TEMP/ws
+          set +e
+          bazel query "kind(kernel_build, //...)" 2>&1 | tail -40 | tee bazel_query.log
+
+      - name: B2 bazel nobuild
+        if: ${{ inputs.stage == 'B' || inputs.stage == 'C' }}
+        run: |
+          cd $RUNNER_TEMP/ws/kernel
+          set +e
+          bazel build --nobuild //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -80 | tee bazel_nobuild.log
+
+      - name: C build
+        if: ${{ inputs.stage == 'C' }}
+        run: |
+          cd $RUNNER_TEMP/ws/kernel
+          set +e
+          bazel build -k //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -200 | tee bazel_build.log
+
+      - name: first error extraction
+        if: always()
+        run: |
+          cd $RUNNER_TEMP/ws || exit 0
+          : > first_error.log
+          for f in sync.log bazel_query.log bazel_nobuild.log bazel_build.log; do
+            [ -f "$f" ] || continue
+            echo "### $f" >> first_error.log
+            ln=$(grep -n -m1 -iE "No such file|error:|ERROR:|FAILED:" "$f" | cut -d: -f1)
+            if [ -n "$ln" ]; then
+              s=$((ln-10)); [ $s -lt 1 ] && s=1
+              sed -n "${s},$((ln+20))p" "$f" >> first_error.log
+            else echo "(no keyword hit)" >> first_error.log; fi
+          done
+          cat first_error.log
+
+      - name: collect logs
+        if: always()
+        run: |
+          cd $RUNNER_TEMP/ws || exit 0
+          for f in sync.log bazel_query.log bazel_nobuild.log bazel_build.log layout.log first_error.log; do
+            [ -f "$f" ] && tail -200 "$f" > "$f.tail200" || true
+          done
+          ls -la *.tail200 first_error.log 2>/dev/null
+
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reno12-logs
+          path: |
+            ${{ runner.temp }}/ws/*.log
+            ${{ runner.temp }}/ws/*.tail200
+            ${{ runner.temp }}/ws/layout.log
+
+      - name: upload images
+        if: ${{ inputs.stage == 'C' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: reno12-images
+          path: |
+            ${{ runner.temp }}/ws/kernel/bazel-bin/**/*.ko
+            ${{ runner.temp }}/ws/kernel/bazel-bin/**/Image*
