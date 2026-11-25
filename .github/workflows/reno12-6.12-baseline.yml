@@ -9,6 +9,8 @@ jobs:
   probe:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
+    env:
+      KERNEL_VERSION: kernel-6.12
     defaults:
       run:
         shell: bash
