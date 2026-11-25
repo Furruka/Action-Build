@@ -102,7 +102,11 @@ jobs:
             mkdir -p kernel/build/build-tools
             rm -rf kernel/build/build-tools/sysroot
             cp -a "$S" kernel/build/build-tools/sysroot
-            echo "copied sysroot -> $S" | tee -a find_musl.log
+            mkdir -p kernel/build/kernel/build-tools
+            rm -rf kernel/build/kernel/build-tools/sysroot
+            cp -a "$S" kernel/build/kernel/build-tools/sysroot
+            echo "copied sysroot -> $S (both build/ and build/kernel/)" | tee -a find_musl.log
+            ls kernel/build/kernel/build-tools/sysroot | head -3 | tee -a find_musl.log
             du -sh kernel/build/build-tools/sysroot 2>/dev/null | tee -a find_musl.log
             find kernel/build/build-tools/sysroot -maxdepth 2 | head -5 | tee -a find_musl.log
           else
