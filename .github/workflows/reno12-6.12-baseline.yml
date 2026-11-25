@@ -97,24 +97,35 @@ jobs:
           if [ -n "$S" ] && [ -d "$S" ]; then cp -a "$S" kernel/build/build-tools/sysroot; fi
           set -e
           ls kernel/external | head -15
-      - name: A5 apply qqcandy v3b patch + embed DTB
+      - name: A5 apply qqcandy v3c patch + embed DTB
+        if: always()
         run: |
-          set -exo pipefail
-          cd $RUNNER_TEMP/ws
-          cp $GITHUB_WORKSPACE/ci-patches/0001-v3b.patch .
-          ( cd kernel-6.12 && git apply --verbose ../0001-v3b.patch ) 2>&1 | tee apply.log
-          ( cd kernel-6.12 && git diff --stat ) 2>&1 | tee -a apply.log
+          cd $RUNNER_TEMP/ws || exit 1
+          : > a5.log
+          set +e
+          cp $GITHUB_WORKSPACE/ci-patches/0001-v3c.patch . 2>>a5.log; echo "cp_rc=$?" >> a5.log
+          ( cd kernel-6.12 && git apply --check ../0001-v3c.patch ) 2>>a5.log; echo "check_rc=$?" >> a5.log
+          ( cd kernel-6.12 && git apply ../0001-v3c.patch ) 2>>a5.log; echo "apply_rc=$?" >> a5.log
+          ( cd kernel-6.12 && git diff --stat ) 2>>a5.log
           mkdir -p kernel-6.12/arch/arm64/boot/dts/mediatek
-          cp $GITHUB_WORKSPACE/ci-files/board-embed.dtb kernel-6.12/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb
-          ls -l kernel-6.12/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb | tee -a apply.log
+          cp $GITHUB_WORKSPACE/ci-files/board-embed.dtb kernel-6.12/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb 2>>a5.log; echo "dtb_rc=$?" >> a5.log
+          ls -l kernel-6.12/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb >> a5.log 2>&1
           {
             echo 'CONFIG_MTK_EMBED_BOARD_DTB=y'
             echo 'CONFIG_MTK_EMBED_BOARD_DTB_PATH="arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb"'
             echo 'CONFIG_MTK_EMBED_DTB_LK_FDT_DUMP=y'
             echo 'CONFIG_MTK_EMBED_DTB_LK_FDT_MAX_KB=1024'
-          } | tee cfg.append
-          cat cfg.append >> kernel/kernel_device_modules-6.12/arch/arm64/configs/mgk_64_k612_defconfig
-          tail -6 kernel/kernel_device_modules-6.12/arch/arm64/configs/mgk_64_k612_defconfig | tee -a apply.log
+            echo 'CONFIG_USB_MTU3=y'
+            echo 'CONFIG_USB_GADGET=y'
+            echo 'CONFIG_USB_CONFIGFS=y'
+            echo 'CONFIG_USB_CONFIGFS_F_FS=y'
+            echo 'CONFIG_PSTORE=y'
+            echo 'CONFIG_PSTORE_RAM=y'
+          } > cfg.append; echo "cfgwrite_rc=$?" >> a5.log
+          cat cfg.append >> kernel/kernel_device_modules-6.12/arch/arm64/configs/mgk_64_k612_defconfig; echo "cfgappend_rc=$?" >> a5.log
+          set -e
+          cat a5.log
+          if grep -qE '_rc=[1-9]' a5.log; then echo 'A5 had failures'; exit 1; fi
       - name: B0 bazel diag + query
         run: |
           set -o pipefail
