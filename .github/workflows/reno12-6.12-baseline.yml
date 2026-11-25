@@ -87,14 +87,20 @@ jobs:
           for d in kernel_platform/external/*; do ln -sfn "$PWD/$d" "kernel/external/$(basename $d)"; done
           ls kernel/external | head -20 | tee -a find_musl.log
 
-      - name: B0 bazel query
+      - name: B0 bazel diag + query
         run: |
           set -o pipefail
           cd $RUNNER_TEMP/ws/kernel
-          chmod +x tools/bazel 2>/dev/null || true
-          ./tools/bazel --version 2>&1 | tail -3 || true
-          ./tools/bazel query "kind(kernel_build, //...)" 2>&1 | tail -30 | tee ../bazel_query.log
-          if grep -qE "ERROR:|No such file|Not a directory|Traceback" ../bazel_query.log; then echo QUERY_FAILED; exit 1; fi
+          {
+            echo "--- workspace dotfiles ---"
+            ls -la | grep -E '\.bazel|WORKSPACE|MODULE' || true
+            echo "--- .bazelversion ---"; cat .bazelversion 2>/dev/null || echo NONE
+            echo "--- .bazelrc ---"; cat .bazelrc 2>/dev/null || echo NONE
+            echo "--- tools ---"; ls tools 2>/dev/null | head
+          } | tee ../bazel_diag.log
+          ./tools/bazel --version 2>&1 | tee -a ../bazel_diag.log
+          ./tools/bazel --enable_workspace --noenable_bzlmod query //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -40 | tee ../bazel_query.log
+          if grep -qE "ERROR:|No such file|not defined" ../bazel_query.log; then echo QUERY_FAILED; exit 1; fi
           echo QUERY_OK
 
       - name: B1 nobuild
