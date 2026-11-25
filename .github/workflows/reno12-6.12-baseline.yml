@@ -94,6 +94,12 @@ jobs:
             echo "linked bazel_common_rules"
           fi
           ls -l kernel/build/ | head -8 | tee -a find_musl.log
+          # kleaf globs build-tools/sysroot under the workspace root
+          if [ -d kernel_platform/build/build-tools ] && [ ! -e kernel/build/build-tools ]; then
+            ln -sfn "$PWD/kernel_platform/build/build-tools" kernel/build/build-tools
+            echo "linked build/build-tools" | tee -a find_musl.log
+          fi
+          ls -l kernel/build/build-tools/ 2>/dev/null | head -6 | tee -a find_musl.log
           mkdir -p kernel/prebuilts/clang/host
           ln -sfn "$PWD/kernel_platform/prebuilts/clang/host/linux-x86" kernel/prebuilts/clang/host/linux-x86
           ls -l kernel/prebuilts/clang/host/ | tee -a find_musl.log
