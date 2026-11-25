@@ -98,7 +98,9 @@ jobs:
           set -e
           ls kernel/external | head -15
       - name: A5 apply qqcandy v3 patch + embed DTB
+        continue-on-error: true
         run: |
+          set -x
           cd $RUNNER_TEMP/ws
           cp $GITHUB_WORKSPACE/ci-patches/0001-v3.patch .
           set +e
