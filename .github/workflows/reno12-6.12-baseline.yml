@@ -95,11 +95,18 @@ jobs:
           fi
           ls -l kernel/build/ | head -8 | tee -a find_musl.log
           # kleaf globs build-tools/sysroot under the workspace root
-          if [ -d kernel_platform/build/build-tools ] && [ ! -e kernel/build/build-tools ]; then
-            ln -sfn "$PWD/kernel_platform/build/build-tools" kernel/build/build-tools
-            echo "linked build/build-tools" | tee -a find_musl.log
+          echo "--- sysroot dirs ---" | tee -a find_musl.log
+          find $PWD -maxdepth 7 -type d -name sysroot 2>/dev/null | head -10 | tee -a find_musl.log
+          S=$(find $PWD -maxdepth 7 -type d -name sysroot 2>/dev/null | head -1)
+          if [ -n "$S" ]; then
+            mkdir -p kernel/build/build-tools
+            rm -rf kernel/build/build-tools/sysroot
+            ln -sfn "$S" kernel/build/build-tools/sysroot
+            echo "linked sysroot -> $S" | tee -a find_musl.log
+            find kernel/build/build-tools/sysroot -maxdepth 2 | head -5 | tee -a find_musl.log
+          else
+            echo "NO_SYSROOT_FOUND" | tee -a find_musl.log
           fi
-          ls -l kernel/build/build-tools/ 2>/dev/null | head -6 | tee -a find_musl.log
           mkdir -p kernel/prebuilts/clang/host
           ln -sfn "$PWD/kernel_platform/prebuilts/clang/host/linux-x86" kernel/prebuilts/clang/host/linux-x86
           ls -l kernel/prebuilts/clang/host/ | tee -a find_musl.log
