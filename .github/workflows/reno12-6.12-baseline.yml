@@ -109,18 +109,21 @@ jobs:
           patch="$GITHUB_WORKSPACE/ci-patches/0001-v3d.patch"
           fdt_fix="$GITHUB_WORKSPACE/ci-patches/0002-v3e-fdt-state.patch"
           init_fix="$GITHUB_WORKSPACE/ci-patches/0003-v3f-init-sections.patch"
+          usb_headers="$GITHUB_WORKSPACE/ci-patches/0004-usb-audio-headers.patch"
           fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
           printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
           git -C "$core" rev-parse HEAD
           git -C "$modules" rev-parse HEAD
           test "$(realpath -e "$(git -C "$core" rev-parse --show-toplevel)")" = "$core"
-          sha256sum "$patch" "$fdt_fix" "$init_fix" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
+          sha256sum "$patch" "$fdt_fix" "$init_fix" "$usb_headers" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
           git -C "$core" apply --check --verbose "$patch"
           git -C "$core" apply --verbose "$patch"
           git -C "$core" apply --check --verbose "$fdt_fix"
           git -C "$core" apply --verbose "$fdt_fix"
           git -C "$core" apply --check --verbose "$init_fix"
           git -C "$core" apply --verbose "$init_fix"
+          git -C "$core" apply --check --verbose "$usb_headers"
+          git -C "$core" apply --verbose "$usb_headers"
           git -C "$core" status --short
           grep -F 'static struct mfdt_ctx ctx __initdata' "$core/arch/arm64/kernel/mtk_embed_merge.c"
           grep -Fx 'config MTK_EMBED_BOARD_DTB' "$core/arch/arm64/Kconfig"
@@ -209,7 +212,7 @@ jobs:
           flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG")
           usb_target=//qqcandy_usb:qqcandy_usb_modules_install
           device_target=//kernel_device_modules-6.12:mgk_64_k612.user
-          ./tools/bazel build "${flags[@]}" "$usb_target" 2>&1 | tee ../usb_build.log
+          ./tools/bazel build "${flags[@]}" --keep_going "$usb_target" 2>&1 | tee ../usb_build.log
           if grep -iE 'needs unknown symbol|disagrees about version|depmod: ERROR' ../usb_build.log; then
             echo 'The USB module set has unresolved symbols' >&2
             exit 1

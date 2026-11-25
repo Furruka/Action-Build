@@ -1,0 +1,12 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -1681,6 +1681,8 @@
+         "drivers/ufs/host/ufshcd-pltfrm.h",
+         "drivers/usb/dwc3/core.h",
+         "drivers/gpio/gpiolib.h",
+         "sound/usb/card.h",
++        "sound/usb/helper.h",
++        "sound/usb/pcm.h",
+         "sound/usb/usbaudio.h",
+         ":all_headers_allowlist_aarch64_globs",
