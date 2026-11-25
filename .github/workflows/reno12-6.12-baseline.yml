@@ -99,7 +99,9 @@ jobs:
             echo "--- tools ---"; ls tools 2>/dev/null | head
           } | tee ../bazel_diag.log
           ./tools/bazel version 2>&1 | tee -a ../bazel_diag.log || true
-          ./tools/bazel --enable_workspace --noenable_bzlmod query //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -40 | tee ../bazel_query.log
+          printf 'common --enable_workspace\ncommon --noenable_bzlmod\n' > .bazelrc
+          cat .bazelrc | tee -a ../bazel_diag.log
+          ./tools/bazel query //kernel_device_modules-6.12:mgk_64_k612 2>&1 | tail -40 | tee ../bazel_query.log
           if grep -qE "ERROR:|No such file|not defined" ../bazel_query.log; then echo QUERY_FAILED; exit 1; fi
           echo QUERY_OK
 
