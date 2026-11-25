@@ -42,7 +42,7 @@ jobs:
         run: |
           cd $RUNNER_TEMP/ws
           set +e
-          repo sync -c -j8 --fail-fast --no-clone-bundle --no-tags 2>&1 | tee sync.log
+          repo sync -c -j8 --no-clone-bundle --no-tags --force-sync 2>&1 | tee sync.log
           df -h / | tail -1
           du -sh . | tail -1
 
