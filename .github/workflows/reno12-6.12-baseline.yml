@@ -97,17 +97,13 @@ jobs:
           if [ -n "$S" ] && [ -d "$S" ]; then cp -a "$S" kernel/build/build-tools/sysroot; fi
           set -e
           ls kernel/external | head -15
-      - name: A5 apply qqcandy v3 patch + embed DTB
-        continue-on-error: true
+      - name: A5 apply qqcandy v3b patch + embed DTB
         run: |
-          set -x
+          set -exo pipefail
           cd $RUNNER_TEMP/ws
-          cp $GITHUB_WORKSPACE/ci-patches/0001-v3.patch .
-          set +e
-          ( cd kernel-6.12 && git apply --verbose ../0001-v3.patch ) 2>&1 | tee apply.log | tail -20
-          rc=${PIPESTATUS[0]}
-          echo "apply_rc=$rc" | tee -a apply.log
-          set -e
+          cp $GITHUB_WORKSPACE/ci-patches/0001-v3b.patch .
+          ( cd kernel-6.12 && git apply --verbose ../0001-v3b.patch ) 2>&1 | tee apply.log
+          ( cd kernel-6.12 && git diff --stat ) 2>&1 | tee -a apply.log
           mkdir -p kernel-6.12/arch/arm64/boot/dts/mediatek
           cp $GITHUB_WORKSPACE/ci-files/board-embed.dtb kernel-6.12/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb
           ls -l kernel-6.12/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb | tee -a apply.log
@@ -116,8 +112,9 @@ jobs:
             echo 'CONFIG_MTK_EMBED_BOARD_DTB_PATH="arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb"'
             echo 'CONFIG_MTK_EMBED_DTB_LK_FDT_DUMP=y'
             echo 'CONFIG_MTK_EMBED_DTB_LK_FDT_MAX_KB=1024'
-          } >> kernel/kernel_device_modules-6.12/arch/arm64/configs/mgk_64_k612_defconfig
-          tail -4 kernel/kernel_device_modules-6.12/arch/arm64/configs/mgk_64_k612_defconfig
+          } | tee cfg.append
+          cat cfg.append >> kernel/kernel_device_modules-6.12/arch/arm64/configs/mgk_64_k612_defconfig
+          tail -6 kernel/kernel_device_modules-6.12/arch/arm64/configs/mgk_64_k612_defconfig | tee -a apply.log
       - name: B0 bazel diag + query
         run: |
           set -o pipefail

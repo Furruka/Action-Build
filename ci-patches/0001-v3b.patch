@@ -1,0 +1,588 @@
+diff -ruN -x *.dtb a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+--- a/arch/arm64/Kconfig	2026-11-25 18:30:12
++++ b/arch/arm64/Kconfig	2026-11-25 18:30:12
+@@ -2338,6 +2338,40 @@
+ 
+ menu "Boot options"
+ 
++config MTK_EMBED_BOARD_DTB
++	bool "Embed a pre-merged board DTB and override LK FDT at boot"
++	depends on OF
++	help
++	  MediaTek LK bootchains hand the kernel their own Android device tree.
++	  This option embeds a pre-merged .dtb file (no dtc at build time) and
++	  replaces initial_boot_params with it right after
++	  setup_machine_fdt(). LK's runtime-injected properties and
++	  /reserved-memory children are copied over first.
++
++config MTK_EMBED_BOARD_DTB_PATH
++	string "Path of the pre-merged DTB, relative to the kernel tree"
++	depends on MTK_EMBED_BOARD_DTB
++	default "arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb"
++	help
++	  The file is copied to arch/arm64/kernel/board-embed.dtb and .incbin'ed.
++	  It must be a ready-to-use flattened DT (merge your base + overlays on
++	  the host with fdtoverlay first); the kernel build does not run dtc.
++
++config MTK_EMBED_DTB_LK_FDT_DUMP
++	bool "Keep a copy of LK's FDT and expose it at /sys/kernel/mtk_lk_fdt"
++	depends on MTK_EMBED_BOARD_DTB
++	help
++	  Saves the FDT LK passed us (post-LK FDT) into a static buffer, readable
++	  as a binary sysfs attribute. Needed to recover the real device tree on
++	  boards without UART.
++
++config MTK_EMBED_DTB_LK_FDT_MAX_KB
++	int "Max size of the saved LK FDT (KiB)"
++	depends on MTK_EMBED_DTB_LK_FDT_DUMP
++	default 1024
++	range 64 4096
++
++
+ config ARM64_ACPI_PARKING_PROTOCOL
+ 	bool "Enable support for the ARM64 ACPI parking protocol"
+ 	depends on ACPI
+diff -ruN -x *.dtb a/arch/arm64/kernel/Makefile b/arch/arm64/kernel/Makefile
+--- a/arch/arm64/kernel/Makefile	2026-11-25 18:30:12
++++ b/arch/arm64/kernel/Makefile	2026-11-25 19:52:16
+@@ -75,6 +75,15 @@
+ $(obj)/vdso-wrap.o: $(obj)/vdso/vdso.so
+ $(obj)/vdso32-wrap.o: $(obj)/vdso32/vdso.so
+ 
++# Embedded board DTB (v2): the DTB is a pre-merged file in the tree; the build
++# only copies it and .incbin's it. No dtc, no $(DTC) dependency.
++obj-$(CONFIG_MTK_EMBED_BOARD_DTB)		+= mtk_embed_dtb.o mtk_embed_merge.o board_dtb.o
++$(obj)/board-embed.dtb: $(srctree)/$(CONFIG_MTK_EMBED_BOARD_DTB_PATH)
++	$(Q)cp -f $< $@
++$(obj)/board_dtb.o: $(obj)/board-embed.dtb
++targets += board-embed.dtb board_dtb.o
++
++
+ obj-y					+= probes/
+ obj-y					+= head.o
+ extra-y					+= vmlinux.lds
+diff -ruN -x *.dtb a/arch/arm64/kernel/board_dtb.S b/arch/arm64/kernel/board_dtb.S
+--- a/arch/arm64/kernel/board_dtb.S	1970-01-01 08:00:00
++++ b/arch/arm64/kernel/board_dtb.S	2026-11-25 18:30:12
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0-only
++ *
++ * board_dtb.S - embed a pre-merged board DTB into the kernel image.
++ * v2: no build-time dtc; the DTB is a plain file in the tree (path from
++ * CONFIG_MTK_EMBED_BOARD_DTB_PATH), copied to $(obj)/board-embed.dtb by a cp
++ * rule and .incbin'ed here.
++ */
++	.section .rodata, "a"
++	.balign 8
++	.global _binary_arch_arm64_kernel_board_embed_dtb_start
++	.global _binary_arch_arm64_kernel_board_embed_dtb_end
++_binary_arch_arm64_kernel_board_embed_dtb_start:
++	.incbin "arch/arm64/kernel/board-embed.dtb"
++_binary_arch_arm64_kernel_board_embed_dtb_end:
++	.balign 8
+diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_dtb.c b/arch/arm64/kernel/mtk_embed_dtb.c
+--- a/arch/arm64/kernel/mtk_embed_dtb.c	1970-01-01 08:00:00
++++ b/arch/arm64/kernel/mtk_embed_dtb.c	2026-11-25 19:52:03
+@@ -0,0 +1,108 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * v3: embed a board DTB and merge LK's handoff tree into it at boot.
++ * The merge logic lives in mtk_embed_merge.c, which is the *same* source used
++ * by the host test (stage11/host), so what was validated on the host is what
++ * runs in the kernel.
++ */
++#include <linux/acpi.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/libfdt.h>
++#include <linux/of_fdt.h>
++#include <linux/sizes.h>
++#include <linux/string.h>
++#include <linux/sysfs.h>
++
++#include <asm/setup.h>
++
++#include "mtk_embed_dtb.h"
++#include "mtk_embed_merge.h"
++
++/* 2 MiB: 585 KiB merged result + slack */
++#define MTK_BOARD_FDT_CAPACITY	SZ_2M
++#define MTK_FDT_HEADROOM	SZ_256K
++
++extern const u8 _binary_arch_arm64_kernel_board_embed_dtb_start[];
++extern const u8 _binary_arch_arm64_kernel_board_embed_dtb_end[];
++
++static u8 board_fdt[MTK_BOARD_FDT_CAPACITY] __aligned(8);
++
++#ifdef CONFIG_MTK_EMBED_DTB_LK_FDT_DUMP
++static u8 lk_fdt_copy[CONFIG_MTK_EMBED_DTB_LK_FDT_MAX_KB * 1024] __aligned(8);
++static unsigned int lk_fdt_size;
++
++static ssize_t mtk_lk_fdt_read(struct file *f, struct kobject *k,
++			       struct bin_attribute *a, char *buf,
++			       loff_t off, size_t count)
++{
++	if (off >= lk_fdt_size)
++		return 0;
++	if (off + count > lk_fdt_size)
++		count = lk_fdt_size - off;
++	memcpy(buf, lk_fdt_copy + off, count);
++	return count;
++}
++
++static struct bin_attribute mtk_lk_fdt_attr = {
++	.attr = { .name = "mtk_lk_fdt", .mode = 0444 },
++	.read = mtk_lk_fdt_read,
++};
++
++static int __init mtk_lk_fdt_sysfs_init(void)
++{
++	if (!lk_fdt_size)
++		return 0;
++	mtk_lk_fdt_attr.size = lk_fdt_size;
++	return sysfs_create_bin_file(kernel_kobj, &mtk_lk_fdt_attr);
++}
++late_initcall(mtk_lk_fdt_sysfs_init);
++
++static void __init mtk_save_lk_fdt(const void *lk)
++{
++	int size;
++
++	if (!lk || fdt_check_header(lk))
++		return;
++	size = fdt_totalsize(lk);
++	if (size <= 0 || size > sizeof(lk_fdt_copy))
++		return;
++	memcpy(lk_fdt_copy, lk, size);
++	lk_fdt_size = size;
++	pr_info("MTK-DTB: saved LK FDT %d bytes -> /sys/kernel/mtk_lk_fdt\n", size);
++}
++#else
++static void __init mtk_save_lk_fdt(const void *lk) { }
++#endif
++
++void __init mtk_embed_dtb_early_init(void)
++{
++	const void *lk_fdt = initial_boot_params;
++	const u8 *emb = _binary_arch_arm64_kernel_board_embed_dtb_start;
++	size_t emb_size = _binary_arch_arm64_kernel_board_embed_dtb_end - emb;
++	struct mfdt_stats st;
++	int ret;
++
++	if (!acpi_disabled)
++		return;
++
++	mtk_save_lk_fdt(lk_fdt);
++	pr_info("MTK-DTB: blob %zu bytes, buffer %zu\n", emb_size, sizeof(board_fdt));
++
++	if (!emb_size || emb_size + MTK_FDT_HEADROOM > sizeof(board_fdt)) {
++		pr_err("MTK-DTB: blob does not fit, keeping LK FDT\n");
++		return;
++	}
++	memcpy(board_fdt, emb, emb_size);
++	ret = mfdt_merge(board_fdt, lk_fdt, sizeof(board_fdt), &st);
++	if (ret) {
++		pr_err("MTK-DTB: merge failed %d, keeping LK FDT\n", ret);
++		return;
++	}
++	pr_info("MTK-DTB: merged added=%d failed=%d remapped=%d\n",
++		st.added, st.failed, st.remapped);
++
++	initial_boot_params = board_fdt;
++	early_init_dt_scan_chosen(boot_command_line);
++	pr_info("MTK-DTB: runtime tree = embedded; cmdline=%s\n", boot_command_line);
++}
+diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_dtb.h b/arch/arm64/kernel/mtk_embed_dtb.h
+--- a/arch/arm64/kernel/mtk_embed_dtb.h	1970-01-01 08:00:00
++++ b/arch/arm64/kernel/mtk_embed_dtb.h	2026-11-25 18:30:12
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __ASM_MTK_EMBED_DTB_H
++#define __ASM_MTK_EMBED_DTB_H
++
++#ifdef CONFIG_MTK_EMBED_BOARD_DTB
++void __init mtk_embed_dtb_early_init(void);
++#else
++static inline void __init mtk_embed_dtb_early_init(void) { }
++#endif
++
++#endif
+diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_merge.c b/arch/arm64/kernel/mtk_embed_merge.c
+--- a/arch/arm64/kernel/mtk_embed_merge.c	1970-01-01 08:00:00
++++ b/arch/arm64/kernel/mtk_embed_merge.c	2026-11-25 19:52:03
+@@ -0,0 +1,335 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * mfdt_merge - merge the LK handoff tree into an embedded board tree.
++ *
++ * This file is deliberately free of kernel headers so the same code can be
++ * compiled and fuzzed on the host (see host_test.c) and linked into the
++ * kernel. Only libfdt is required.
++ */
++#include <linux/types.h>
++
++#include <linux/string.h>
++
++#include "mtk_embed_merge.h"
++
++#define MFDT_MAX_MAP 128
++
++struct mfdt_map {
++	uint32_t old_ph;
++	uint32_t new_ph;
++};
++
++struct mfdt_ctx {
++	void *dst;
++	const void *lk;
++	struct mfdt_map map[MFDT_MAX_MAP];
++	int nmap;
++	uint32_t next_ph;
++	int added;
++	int failed;
++};
++
++static int mfdt_copy_props(struct mfdt_ctx *c, int lk_off, int d_off, bool skip_phandle)
++{
++	int poff, len, ret = 0;
++	const char *name;
++
++	fdt_for_each_property_offset(poff, c->lk, lk_off) {
++		const void *val = fdt_getprop_by_offset(c->lk, poff, &name, &len);
++
++		if (!val || len < 0)
++			continue;
++		if (skip_phandle && (!strcmp(name, "phandle") || !strcmp(name, "linux,phandle")))
++			continue;
++		if (fdt_setprop(c->dst, d_off, name, val, len))
++			ret = -1;
++	}
++	return ret;
++}
++
++/* allocate a phandle that does not collide with anything already in dst */
++static uint32_t mfdt_new_phandle(struct mfdt_ctx *c)
++{
++	while (fdt_node_offset_by_phandle(c->dst, (int)c->next_ph) >= 0)
++		c->next_ph++;
++	return c->next_ph++;
++}
++
++static int mfdt_copy_node(struct mfdt_ctx *c, int lk_off, int d_parent, const char *name)
++{
++	int d_off, ph, ret;
++
++	d_off = fdt_add_subnode(c->dst, d_parent, name);
++	if (d_off < 0) {
++		c->failed++;
++		return d_off;
++	}
++	if (mfdt_copy_props(c, lk_off, d_off, true)) {
++		c->failed++;
++		return -1;
++	}
++	ph = fdt_get_phandle(c->lk, lk_off);
++	if (ph > 0 && c->nmap < MFDT_MAX_MAP) {
++		uint32_t newph = mfdt_new_phandle(c);
++
++		if (!fdt_setprop_u32(c->dst, d_off, "phandle", newph)) {
++			c->map[c->nmap].old_ph = (uint32_t)ph;
++			c->map[c->nmap].new_ph = newph;
++			c->nmap++;
++		}
++	}
++	/* copy children of this node recursively (plain properties only) */
++	{
++		int child;
++
++		fdt_for_each_subnode(child, c->lk, lk_off) {
++			const char *cn = fdt_get_name(c->lk, child, NULL);
++
++			if (cn)
++				mfdt_copy_node(c, child, d_off, cn);
++		}
++	}
++	c->added++;
++	return d_off;
++}
++
++/* rewrite phandle references after all copied nodes got their new numbers */
++static void mfdt_fixup_refs(struct mfdt_ctx *c)
++{
++	static const char *const refprops[] = { "memory-region", "interconnects", "iommus" };
++	int off;
++
++	for (off = 0; off >= 0; off = fdt_next_node(c->dst, off, NULL)) {
++		size_t i;
++
++		for (i = 0; i < sizeof(refprops) / sizeof(refprops[0]); i++) {
++			int len, j;
++			const void *val = fdt_getprop(c->dst, off, refprops[i], &len);
++
++			if (!val || len < 4 || len % 4)
++				continue;
++			{
++				uint32_t *cells = (uint32_t *)val;
++				uint32_t out[16];
++				bool changed = false;
++
++				for (j = 0; j < len / 4 && j < 16; j++) {
++					uint32_t v = fdt32_to_cpu(cells[j]);
++					int k;
++
++					out[j] = v;
++					for (k = 0; k < c->nmap; k++)
++						if (c->map[k].old_ph == v) {
++							out[j] = c->map[k].new_ph;
++							changed = true;
++						}
++				}
++				if (changed) {
++					uint32_t be[16];
++
++					for (j = 0; j < len / 4 && j < 16; j++)
++						be[j] = cpu_to_fdt32(out[j]);
++					fdt_setprop(c->dst, off, refprops[i], be, (len / 4) * 4);
++				}
++			}
++		}
++	}
++}
++
++static int mfdt_merge_reserved(struct mfdt_ctx *c)
++{
++	int lk_rm = fdt_path_offset(c->lk, "/reserved-memory");
++	int d_rm = fdt_path_offset(c->dst, "/reserved-memory");
++	int child;
++
++	if (lk_rm < 0)
++		return 0;
++	if (d_rm < 0) {
++		d_rm = fdt_add_subnode(c->dst, 0, "reserved-memory");
++		if (d_rm < 0)
++			return d_rm;
++	}
++	fdt_for_each_subnode(child, c->lk, lk_rm) {
++		const char *name = fdt_get_name(c->lk, child, NULL);
++		int d_child;
++
++		if (!name || strncmp(name, "mblock-", 7))
++			continue;
++		d_child = fdt_subnode_offset(c->dst, d_rm, name);
++		if (d_child < 0) {
++			mfdt_copy_node(c, child, d_rm, name);
++		} else {
++			/* same name: LK's reg/size wins */
++			mfdt_copy_props(c, child, d_child, true);
++		}
++	}
++	return 0;
++}
++
++
++/* LK injects memory-region on nodes that already exist in our tree (wifi@18000000).
++ * Copy the raw value here; mfdt_fixup_refs() rewrites the phandle afterwards. */
++static void mfdt_merge_memregions(struct mfdt_ctx *c)
++{
++	int off;
++	char path[256];
++
++	for (off = 0; off >= 0; off = fdt_next_node(c->lk, off, NULL)) {
++		int len, d;
++		const void *mr = fdt_getprop(c->lk, off, "memory-region", &len);
++
++		if (!mr || len < 4 || len % 4)
++			continue;
++		if (fdt_get_path(c->lk, off, path, sizeof(path)))
++			continue;
++		d = fdt_path_offset(c->dst, path);
++		if (d < 0)
++			continue;
++		if (!fdt_getprop(c->dst, d, "memory-region", NULL))
++			fdt_setprop(c->dst, d, "memory-region", mr, len);
++	}
++}
++
++static int mfdt_merge_memory(struct mfdt_ctx *c)
++{
++	static const char *const props[] = { "reg", "mblock_info" };
++	int lk = fdt_path_offset(c->lk, "/memory");
++	int d = fdt_path_offset(c->dst, "/memory");
++	size_t i;
++
++	if (lk < 0 || d < 0)
++		return 0;
++	for (i = 0; i < sizeof(props) / sizeof(props[0]); i++) {
++		int len;
++		const void *v = fdt_getprop(c->lk, lk, props[i], &len);
++
++		if (v)
++			fdt_setprop(c->dst, d, props[i], v, len);
++	}
++	return 0;
++}
++
++static int mfdt_merge_chosen(struct mfdt_ctx *c)
++{
++	int lk = fdt_path_offset(c->lk, "/chosen");
++	int d = fdt_path_offset(c->dst, "/chosen");
++	int poff;
++
++	if (lk < 0)
++		return 0;
++	if (d < 0) {
++		d = fdt_add_subnode(c->dst, 0, "chosen");
++		if (d < 0)
++			return d;
++	}
++	fdt_for_each_property_offset(poff, c->lk, lk) {
++		const char *name;
++		const void *v;
++		int len;
++
++		v = fdt_getprop_by_offset(c->lk, poff, &name, &len);
++		if (!v || len < 0)
++			continue;
++		/* ours wins: do not touch stdout-path; never import a foreign phandle */
++		if (!strcmp(name, "stdout-path") || !strcmp(name, "linux,stdout-path") ||
++		    !strcmp(name, "phandle") || !strcmp(name, "linux,phandle"))
++			continue;
++		fdt_setprop(c->dst, d, name, v, len);
++	}
++	return 0;
++}
++
++static int mfdt_merge_node_props(struct mfdt_ctx *c, const char *path)
++{
++	int lk = fdt_path_offset(c->lk, path);
++	int d = fdt_path_offset(c->dst, path);
++	int poff;
++
++	if (lk < 0 || d < 0)
++		return 0;
++	fdt_for_each_property_offset(poff, c->lk, lk) {
++		const char *name;
++		const void *v;
++		int len;
++
++		v = fdt_getprop_by_offset(c->lk, poff, &name, &len);
++		if (!v || len < 0 || !strcmp(name, "phandle") || !strcmp(name, "linux,phandle"))
++			continue;
++		fdt_setprop(c->dst, d, name, v, len);
++	}
++	return 0;
++}
++
++static void mfdt_copy_whole(struct mfdt_ctx *c, const char *path)
++{
++	int lk = fdt_path_offset(c->lk, path);
++	int d;
++
++	if (lk < 0)
++		return;
++	d = fdt_path_offset(c->dst, path);
++	if (d < 0) {
++		const char *slash = strrchr(path, '/');
++		int parent;
++
++		if (!slash || slash == path)
++			parent = 0;
++		else {
++			char pbuf[128];
++			size_t n = slash - path;
++
++			if (n >= sizeof(pbuf))
++				return;
++			memcpy(pbuf, path, n);
++			pbuf[n] = 0;
++			parent = fdt_path_offset(c->dst, pbuf);
++			if (parent < 0)
++				parent = 0;
++		}
++		mfdt_copy_node(c, lk, parent, slash ? slash + 1 : path);
++	} else {
++		mfdt_copy_props(c, lk, d, true);
++	}
++}
++
++int mfdt_merge(void *dst, const void *lk, size_t capacity, struct mfdt_stats *st)
++{
++	struct mfdt_ctx c;
++	uint32_t maxph = 1;
++	int off, ret;
++
++	if (fdt_check_header(dst) || fdt_check_header(lk))
++		return -1;
++	if (fdt_open_into(dst, dst, capacity))
++		return -2;
++
++	memset(&c, 0, sizeof(c));
++	c.dst = dst;
++	c.lk = lk;
++
++	for (off = 0; off >= 0; off = fdt_next_node(dst, off, NULL)) {
++		uint32_t ph = fdt_get_phandle(dst, off);
++
++		if (ph > maxph)
++			maxph = ph;
++	}
++	c.next_ph = maxph + 1;
++
++	mfdt_merge_memory(&c);
++	mfdt_merge_chosen(&c);
++	mfdt_merge_node_props(&c, "/soc/mddriver");
++	mfdt_merge_reserved(&c);
++	mfdt_merge_memregions(&c);
++	mfdt_copy_whole(&c, "/bootprof");
++	mfdt_copy_whole(&c, "/debug-kinfo");
++	mfdt_copy_whole(&c, "/firmware/android");
++	mfdt_fixup_refs(&c);
++
++	ret = fdt_pack(dst);
++	if (st) {
++		st->added = c.added;
++		st->failed = c.failed;
++		st->remapped = c.nmap;
++	}
++	return ret ? -3 : 0;
++}
+diff -ruN -x *.dtb a/arch/arm64/kernel/mtk_embed_merge.h b/arch/arm64/kernel/mtk_embed_merge.h
+--- a/arch/arm64/kernel/mtk_embed_merge.h	1970-01-01 08:00:00
++++ b/arch/arm64/kernel/mtk_embed_merge.h	2026-11-25 19:52:03
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef MTK_EMBED_MERGE_H
++#define MTK_EMBED_MERGE_H
++
++#include <linux/libfdt.h>
++
++
++struct mfdt_stats {
++	int added;
++	int failed;
++	int remapped;
++};
++
++int mfdt_merge(void *dst, const void *lk, size_t capacity, struct mfdt_stats *st);
++
++#endif
+diff -ruN -x *.dtb a/arch/arm64/kernel/setup.c b/arch/arm64/kernel/setup.c
+--- a/arch/arm64/kernel/setup.c	2026-11-25 18:30:12
++++ b/arch/arm64/kernel/setup.c	2026-11-25 18:30:13
+@@ -27,6 +27,7 @@
+ #include <linux/proc_fs.h>
+ #include <linux/memblock.h>
+ #include <linux/of_fdt.h>
++#include "mtk_embed_dtb.h"
+ #include <linux/efi.h>
+ #include <linux/psci.h>
+ #include <linux/sched/task.h>
+@@ -291,6 +292,8 @@
+ 	early_ioremap_init();
+ 
+ 	setup_machine_fdt(__fdt_pointer);
++
++	mtk_embed_dtb_early_init();
+ 
+ 	/*
+ 	 * Initialise the static keys early as they may be enabled by the
