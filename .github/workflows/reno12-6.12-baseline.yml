@@ -124,7 +124,7 @@ jobs:
         run: |
           set -o pipefail
           cd $RUNNER_TEMP/ws/kernel
-          ./tools/bazel build $FLAGS --nobuild //kernel_device_modules-6.12:mgk_64_k612_customer_modules_install.user 2>&1 | tail -120 | tee ../bazel_nobuild.log
+          ./tools/bazel build $FLAGS --nobuild //kernel_device_modules-6.12:mgk_64_k612_kernel_aarch64.user 2>&1 | tail -120 | tee ../bazel_nobuild.log
           if grep -qE "ERROR:|No such file" ../bazel_nobuild.log; then echo "NOBUILD_FAILED"; exit 1; fi
           echo NOBUILD_OK
 
@@ -132,8 +132,10 @@ jobs:
         run: |
           set -o pipefail
           cd $RUNNER_TEMP/ws/kernel
-          ./tools/bazel build $FLAGS -k //kernel_device_modules-6.12:mgk_64_k612_customer_modules_install.user 2>&1 | tail -200 | tee ../bazel_build.log
-          ls -la bazel-bin/kernel_device_modules-6.12/ 2>/dev/null | head -10 | tee -a ../bazel_build.log
+          ./tools/bazel build $FLAGS -k //kernel_device_modules-6.12:mgk_64_k612_kernel_aarch64.user 2>&1 | tail -200 | tee ../bazel_build.log
+          find bazel-bin/kernel_device_modules-6.12 -maxdepth 4 -name 'Image*' -type f -exec ls -l {} \; | tee ../image_list.log
+          find bazel-bin/kernel_device_modules-6.12 -maxdepth 4 -name 'Image*' -type f -exec md5sum {} \; | tee -a ../image_list.log
+          if ! grep -q 'Image' ../image_list.log; then echo 'NO_IMAGE_PRODUCED'; exit 1; fi
           if grep -qE "ERROR:" ../bazel_build.log; then echo BUILD_FAILED; exit 1; fi
 
       - name: first error extraction
