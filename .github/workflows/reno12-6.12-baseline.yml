@@ -2,6 +2,8 @@ name: Reno12 6.12 baseline probe
 
 on:
   workflow_dispatch:
+  push:
+    branches: [reno12-6.12-baseline]
     inputs:
       stage:
         description: "A=sync+layout, B=bazel query, C=full build"
