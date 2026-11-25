@@ -75,7 +75,7 @@ jobs:
           echo '--- kernel top (before) ---'
           ls -la kernel | head -20
           echo '--- kernel/prebuilts kernel/build kernel/tools kernel/external ---'
-          ls -la kernel/prebuilts kernel/build kernel/tools kernel/external 2>/dev/null | head -30
+          ls -la kernel/prebuilts kernel/build kernel/tools kernel/external 2>/dev/null | head -30 || true
           sudo rm -rf kernel/prebuilts kernel/external
           mkdir -p kernel/prebuilts kernel/external
           sudo mount --bind kernel_platform/prebuilts kernel/prebuilts
@@ -86,16 +86,16 @@ jobs:
           ls kernel/prebuilts | head -20
           ls -l kernel/prebuilts/build-tools/linux_musl-x86/bin/py3-cmd 2>/dev/null || echo NO_MUSL
           ls -l kernel/prebuilts/kernel-build-tools/bazel/linux-x86_64/bazel 2>/dev/null || echo NO_BAZEL_BIN
-          echo '--- sysroot ---'
+          set +e
           S=$(find $PWD/kernel_platform -maxdepth 7 -type d -name sysroot 2>/dev/null | head -1)
           echo "sysroot source: $S"
           mkdir -p kernel/build/kernel/build-tools
           rm -rf kernel/build/kernel/build-tools/sysroot
-          cp -a "$S" kernel/build/kernel/build-tools/sysroot
+          if [ -n "$S" ] && [ -d "$S" ]; then cp -a "$S" kernel/build/kernel/build-tools/sysroot; else echo NO_SYSROOT; fi
           mkdir -p kernel/build/build-tools
           rm -rf kernel/build/build-tools/sysroot
-          cp -a "$S" kernel/build/build-tools/sysroot
-          echo '--- external ---'
+          if [ -n "$S" ] && [ -d "$S" ]; then cp -a "$S" kernel/build/build-tools/sysroot; fi
+          set -e
           ls kernel/external | head -15
       - name: B0 bazel diag + query
         run: |
