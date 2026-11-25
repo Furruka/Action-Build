@@ -103,8 +103,12 @@ jobs:
             echo "--- .bazelrc ---"; cat .bazelrc 2>/dev/null || echo NONE
             echo "--- tools ---"; ls tools 2>/dev/null | head
           } | tee ../bazel_diag.log
+          echo "--- bazel prebuilts versions ---" | tee -a ../bazel_diag.log
+          ls -l ../kernel_platform/prebuilts/kernel-build-tools/bazel/ 2>/dev/null | tail -5 | tee -a ../bazel_diag.log || true
+          echo "--- kernel/external ---" | tee -a ../bazel_diag.log
+          ls ../kernel/external 2>/dev/null | head -25 | tee -a ../bazel_diag.log || true
           ./tools/bazel version 2>&1 | tee -a ../bazel_diag.log || true
-          FLAGS="--enable_workspace --noenable_bzlmod --//build/bazel_mgk_rules:kernel_version=6.12 --repo_manifest=$PWD/kernel:$PWD/kernel/kernel_device_modules-6.12/fake_manifest.xml"
+          FLAGS="--config=internet --enable_workspace --noenable_bzlmod --//build/bazel_mgk_rules:kernel_version=6.12 --repo_manifest=$PWD/kernel:$PWD/kernel/kernel_device_modules-6.12/fake_manifest.xml"
           echo "official-flags: $FLAGS" | tee -a ../bazel_diag.log
           ./tools/bazel query $FLAGS //kernel_device_modules-6.12:mgk_64_k612_customer_modules_install.user 2>&1 | tail -40 | tee ../bazel_query.log
           if grep -qE "ERROR:|No such file|not defined" ../bazel_query.log; then echo QUERY_FAILED; exit 1; fi
