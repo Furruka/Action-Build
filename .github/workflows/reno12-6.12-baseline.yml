@@ -109,7 +109,7 @@ jobs:
           patch="$GITHUB_WORKSPACE/ci-patches/0001-v3d.patch"
           fdt_fix="$GITHUB_WORKSPACE/ci-patches/0002-v3e-fdt-state.patch"
           init_fix="$GITHUB_WORKSPACE/ci-patches/0003-v3f-init-sections.patch"
-          usb_headers="$GITHUB_WORKSPACE/ci-patches/0004-usb-audio-headers.patch"
+          usb_headers="$GITHUB_WORKSPACE/ci-patches/0004-usb-ddk-headers.patch"
           fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
           printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
           git -C "$core" rev-parse HEAD
