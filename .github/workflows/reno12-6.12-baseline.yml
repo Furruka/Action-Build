@@ -128,9 +128,19 @@ jobs:
           install -D -m 644 "$GITHUB_WORKSPACE/ci-files/board-embed.dtb" "$dtb"
           install -m 644 "$fragment" "$modules/kernel/configs/qqcandy-embed.config"
           printf '\nexports_files(["kernel/configs/qqcandy-embed.config"])\n' >> "$modules/BUILD.bazel"
+          # The public module tree omits the optional OPLUS voice-wake monitor.
+          # Its two unconditional imports otherwise stop all device configurations.
+          if [ ! -f "$modules/drivers/soc/oplus/oplus_vow_monitor/Kconfig" ]; then
+            monitor_source='source "$(KCONFIG_EXT_PREFIX)drivers/soc/oplus/oplus_vow_monitor/Kconfig"'
+            for kconfig in "$modules/drivers/misc/mediatek/vow/Kconfig" "$modules/sound/soc/codecs/Kconfig"; do
+              grep -Fx -- "$monitor_source" "$kconfig"
+              grep -Fvx -- "$monitor_source" "$kconfig" > "$kconfig.qqcandy"
+              mv "$kconfig.qqcandy" "$kconfig"
+            done
+          fi
           sha256sum "$core/arch/arm64/kernel/mtk_embed_merge.c" "$dtb"
 
-      - name: Check the USB module build graph
+      - name: Check the USB module build graph and device configuration
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/ws/kernel"
@@ -138,6 +148,8 @@ jobs:
           install -m 644 "$GITHUB_WORKSPACE/ci-files/qqcandy-usb.BUILD.bazel" qqcandy_usb/BUILD.bazel
           ./tools/bazel build "$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" --nobuild \
             //qqcandy_usb:qqcandy_usb_modules_install 2>&1 | tee ../usb_analysis.log
+          ./tools/bazel build "$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" \
+            //kernel_device_modules-6.12:mgk_64_k612.user_config 2>&1 | tee ../device_config_build.log
 
       - name: B and C build configuration and verify the linked DTB
         run: |
@@ -233,7 +245,7 @@ jobs:
         run: |
           cd $RUNNER_TEMP/ws || exit 0
           : > first_error.log
-          for f in sync.log a5.log usb_analysis.log config_build.log bazel_build.log usb_build.log; do
+          for f in sync.log a5.log usb_analysis.log device_config_build.log config_build.log bazel_build.log usb_build.log; do
             [ -f "$f" ] || continue
             echo "### $f" >> first_error.log
             if match="$(grep -n -m1 -iE 'No such file|error:|couldn.t find|FAILED:' "$f")"; then
