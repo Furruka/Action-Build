@@ -1,11 +1,17 @@
 diff --git a/BUILD.bazel b/BUILD.bazel
 --- a/BUILD.bazel
 +++ b/BUILD.bazel
-@@ -1681,6 +1681,10 @@
+@@ -1681,6 +1681,16 @@
          "drivers/ufs/host/ufshcd-pltfrm.h",
          "drivers/usb/dwc3/core.h",
 +        "drivers/usb/gadget/function/u_fs.h",
 +        "drivers/usb/typec/class.h",
++        "drivers/android/debug_kinfo.h",
++        "drivers/pinctrl/core.h",
++        "drivers/pinctrl/mediatek/pinctrl-mtk-common-v2.h",
++        "drivers/pinctrl/pinconf.h",
++        "drivers/pinctrl/pinctrl-utils.h",
++        "drivers/pinctrl/pinmux.h",
          "drivers/gpio/gpiolib.h",
          "sound/usb/card.h",
 +        "sound/usb/helper.h",
