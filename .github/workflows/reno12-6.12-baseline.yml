@@ -101,8 +101,9 @@ jobs:
           if [ -n "$S" ]; then
             mkdir -p kernel/build/build-tools
             rm -rf kernel/build/build-tools/sysroot
-            ln -sfn "$S" kernel/build/build-tools/sysroot
-            echo "linked sysroot -> $S" | tee -a find_musl.log
+            cp -a "$S" kernel/build/build-tools/sysroot
+            echo "copied sysroot -> $S" | tee -a find_musl.log
+            du -sh kernel/build/build-tools/sysroot 2>/dev/null | tee -a find_musl.log
             find kernel/build/build-tools/sysroot -maxdepth 2 | head -5 | tee -a find_musl.log
           else
             echo "NO_SYSROOT_FOUND" | tee -a find_musl.log
