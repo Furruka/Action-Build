@@ -88,6 +88,12 @@ jobs:
           mkdir -p kernel/external
           for d in kernel_platform/external/*; do ln -sfn "$PWD/$d" "kernel/external/$(basename $d)"; done
           ls kernel/external | head -20 | tee -a find_musl.log
+          # kleaf loads //build/bazel_common_rules/... from the workspace root
+          if [ -d kernel_platform/build/bazel_common_rules ] && [ ! -e kernel/build/bazel_common_rules ]; then
+            ln -sfn "$PWD/kernel_platform/build/bazel_common_rules" kernel/build/bazel_common_rules
+            echo "linked bazel_common_rules"
+          fi
+          ls -l kernel/build/ | head -8 | tee -a find_musl.log
           mkdir -p kernel/prebuilts/clang/host
           ln -sfn "$PWD/kernel_platform/prebuilts/clang/host/linux-x86" kernel/prebuilts/clang/host/linux-x86
           ls -l kernel/prebuilts/clang/host/ | tee -a find_musl.log
