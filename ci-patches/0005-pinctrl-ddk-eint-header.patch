@@ -1,0 +1,19 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/pinctrl/mediatek/BUILD.bazel b/kernel/kernel_device_modules-6.12/drivers/pinctrl/mediatek/BUILD.bazel
+--- a/kernel/kernel_device_modules-6.12/drivers/pinctrl/mediatek/BUILD.bazel
++++ b/kernel/kernel_device_modules-6.12/drivers/pinctrl/mediatek/BUILD.bazel
+@@ -87,6 +87,7 @@
+     name = "pinctrl-mtk-common-v2_debug",
+     srcs = [
+         "pinctrl-mtk-common-v2_debug.c",
++        "mtk-eint.h",
+         "pinctrl-mtk-common-v2.h",
+         "pinctrl-paris.h",
+     ],
+@@ -98,6 +99,7 @@
+     name = "pinctrl-{}".format(p),
+     srcs = [
+         "pinctrl-{}.c".format(p),
++        "mtk-eint.h",
+         "pinctrl-mtk-common-v2.h",
+         "pinctrl-paris.h",
+     ] + glob(["pinctrl-mtk-{}.h".format(p)]),
