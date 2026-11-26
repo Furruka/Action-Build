@@ -1,0 +1,250 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/extcon/extcon-mtk-usb.c b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/extcon/extcon-mtk-usb.c
+--- a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/extcon/extcon-mtk-usb.c
++++ b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/extcon/extcon-mtk-usb.c
+@@ -24,7 +24,7 @@
+ #include "extcon-mtk-usb.h"
+ 
+ #if IS_ENABLED(CONFIG_TCPC_CLASS)
+-#include "tcpm.h"
++#include "tcpci_core.h"
+ #endif
+ 
+ static const unsigned int usb_extcon_cable[] = {
+@@ -168,35 +168,50 @@
+ 	return NOTIFY_DONE;
+ }
+ 
++static int mtk_usb_extcon_psy_get(struct mtk_extcon_info *extcon)
++{
++	struct device *dev = extcon->dev;
++	struct power_supply *psy;
++
++	if (!of_property_present(dev->of_node, "charger"))
++		return 0;
++
++	psy = devm_power_supply_get_by_phandle(dev, "charger");
++	if (!IS_ERR_OR_NULL(psy)) {
++		extcon->usb_psy = psy;
++		return 0;
++	}
++
++	/* BC1.2 supplies the sink data role when Type-C sink events are bypassed. */
++	if (extcon->bypss_typec_sink)
++		return dev_err_probe(dev, psy ? PTR_ERR(psy) : -EPROBE_DEFER,
++				     "waiting for charger power supply\n");
++
++	return 0;
++}
++
+ static int mtk_usb_extcon_psy_init(struct mtk_extcon_info *extcon)
+ {
+-	int ret = 0;
+ 	struct device *dev = extcon->dev;
+-
+-	if (!of_property_read_bool(dev->of_node, "charger")) {
+-		ret = -EINVAL;
+-		goto fail;
+-	}
+-
+-	extcon->usb_psy = devm_power_supply_get_by_phandle(dev, "charger");
+-	if (IS_ERR_OR_NULL(extcon->usb_psy)) {
++	int ret;
++
++	if (!of_property_present(dev->of_node, "charger"))
++		return 0;
++
++	if (!extcon->usb_psy) {
+ 		/* try to get by name */
+ 		extcon->usb_psy = power_supply_get_by_name("primary_chg");
+-		if (IS_ERR_OR_NULL(extcon->usb_psy)) {
+-			dev_err(dev, "fail to get usb_psy\n");
+-			extcon->usb_psy = NULL;
+-			ret = -EINVAL;
+-			goto fail;
+-		}
++		if (!extcon->usb_psy)
++			return -ENODEV;
+ 	}
+ 
+ 	INIT_DELAYED_WORK(&extcon->wq_psy, mtk_usb_extcon_psy_detector);
+-
+ 	extcon->psy_nb.notifier_call = mtk_usb_extcon_psy_notifier;
++
+ 	ret = power_supply_reg_notifier(&extcon->psy_nb);
+-	if (ret)
+-		dev_err(dev, "fail to register notifer\n");
+-fail:
++	if (!ret && extcon->bypss_typec_sink)
++		queue_delayed_work(system_power_efficient_wq, &extcon->wq_psy, 0);
++
+ 	return ret;
+ }
+ 
+@@ -470,35 +485,46 @@
+ 	return NOTIFY_OK;
+ }
+ 
+-static int mtk_usb_extcon_tcpc_init(struct mtk_extcon_info *extcon)
++static struct tcpc_device *mtk_usb_extcon_tcpc_get(struct device *dev)
+ {
+ 	struct tcpc_device *tcpc_dev;
+-	struct device_node *np = extcon->dev->of_node;
+ 	const char *tcpc_name;
+ 	int ret;
+ 
+-	ret = of_property_read_string(np, "tcpc", &tcpc_name);
+-	if (ret < 0)
+-		return -ENODEV;
++	if (!of_property_present(dev->of_node, "tcpc"))
++		return NULL;
++
++	ret = of_property_read_string(dev->of_node, "tcpc", &tcpc_name);
++	if (ret)
++		return ERR_PTR(dev_err_probe(dev, ret, "invalid TCPC name\n"));
+ 
+ 	tcpc_dev = tcpc_dev_get_by_name(tcpc_name);
+-	if (!tcpc_dev) {
+-		dev_err(extcon->dev, "get tcpc device fail\n");
+-		return -ENODEV;
+-	}
++	if (!tcpc_dev)
++		return ERR_PTR(dev_err_probe(dev, -EPROBE_DEFER, "waiting for TCPC\n"));
++
++	return tcpc_dev;
++}
++
++static void mtk_usb_extcon_tcpc_init(struct mtk_extcon_info *extcon,
++				   struct tcpc_device *tcpc_dev)
++{
++	const u8 flags = TCP_NOTIFY_TYPE_USB | TCP_NOTIFY_TYPE_VBUS |
++			 TCP_NOTIFY_TYPE_MISC;
++	int ret;
++
++	if (!tcpc_dev)
++		return;
+ 
+ 	extcon->tcpc_nb.notifier_call = mtk_extcon_tcpc_notifier;
+-	ret = register_tcp_dev_notifier(tcpc_dev, &extcon->tcpc_nb,
+-		TCP_NOTIFY_TYPE_USB | TCP_NOTIFY_TYPE_VBUS |
+-		TCP_NOTIFY_TYPE_MISC);
+-	if (ret < 0) {
+-		dev_err(extcon->dev, "register notifer fail\n");
+-		return -EINVAL;
++	ret = register_tcp_dev_notifier(tcpc_dev, &extcon->tcpc_nb, flags);
++	if (ret) {
++		unregister_tcp_dev_notifier(tcpc_dev, &extcon->tcpc_nb, flags);
++		put_device(&tcpc_dev->dev);
++		dev_err(extcon->dev, "failed to register TCPC notifier: %d\n", ret);
++		return;
+ 	}
+ 
+ 	extcon->tcpc_dev = tcpc_dev;
+-
+-	return 0;
+ }
+ #endif
+ 
+@@ -697,6 +723,7 @@
+ 	struct device *dev = &pdev->dev;
+ 	struct mtk_extcon_info *extcon;
+ #if IS_ENABLED(CONFIG_TCPC_CLASS)
++	struct tcpc_device *tcpc_dev;
+ 	const char *tcpc_name;
+ #endif
+ 	int ret;
+@@ -706,6 +733,11 @@
+ 		return -ENOMEM;
+ 
+ 	extcon->dev = dev;
++	extcon->bypss_typec_sink = of_property_read_bool(dev->of_node,
++						       "mediatek,bypss-typec-sink");
++	ret = mtk_usb_extcon_psy_get(extcon);
++	if (ret)
++		return ret;
+ 
+ 	/* extcon */
+ 	extcon->edev = devm_extcon_dev_allocate(dev, usb_extcon_cable);
+@@ -720,11 +752,27 @@
+ 		return ret;
+ 	}
+ 
++	extcon->extcon_wq = create_singlethread_workqueue("extcon_usb");
++	if (!extcon->extcon_wq)
++		return -ENOMEM;
++
++#if IS_ENABLED(CONFIG_TCPC_CLASS)
++	tcpc_dev = mtk_usb_extcon_tcpc_get(dev);
++	if (IS_ERR(tcpc_dev)) {
++		ret = PTR_ERR(tcpc_dev);
++		goto destroy_workqueue;
++	}
++#endif
++
+ 	/* usb role switch */
+-	extcon->role_sw = usb_role_switch_get(extcon->dev);
++	extcon->role_sw = usb_role_switch_get(dev);
+ 	if (IS_ERR(extcon->role_sw)) {
+-		dev_err(dev, "failed to get usb role\n");
+-		return PTR_ERR(extcon->role_sw);
++#if IS_ENABLED(CONFIG_TCPC_CLASS)
++		if (tcpc_dev)
++			put_device(&tcpc_dev->dev);
++#endif
++		ret = dev_err_probe(dev, PTR_ERR(extcon->role_sw), "failed to get usb role\n");
++		goto destroy_workqueue;
+ 	}
+ 
+ 	/* initial usb role */
+@@ -736,15 +784,13 @@
+ 	if (ret < 0)
+ 		dev_err(dev, "failed to init vbus\n");
+ 
+-	extcon->bypss_typec_sink =
+-		of_property_read_bool(dev->of_node,
+-			"mediatek,bypss-typec-sink");
+ #ifdef OPLUS_FEATURE_CHG_BASIC
+ 	extcon->oplus_vbus_set =
+ 		of_property_read_bool(dev->of_node,
+ 			"oplus,vbus_set");
+ #endif /* OPLUS_FEATURE_CHG_BASIC */
+ #if IS_ENABLED(CONFIG_TCPC_CLASS)
++	mtk_usb_extcon_tcpc_init(extcon, tcpc_dev);
+ 	ret = of_property_read_string(dev->of_node, "tcpc", &tcpc_name);
+ 	if (of_property_read_bool(dev->of_node, "mediatek,u2") && ret == 0
+ 		&& strcmp(tcpc_name, "type_c_port0") == 0) {
+@@ -752,30 +798,23 @@
+ 	}
+ #endif
+ 
+-	extcon->extcon_wq = create_singlethread_workqueue("extcon_usb");
+-	if (!extcon->extcon_wq)
+-		return -ENOMEM;
+-
+ 	/* power psy */
+ 	ret = mtk_usb_extcon_psy_init(extcon);
+ 	if (ret < 0)
+-		dev_err(dev, "failed to init psy\n");
++		dev_err(dev, "failed to init psy: %d\n", ret);
+ 
+ 	/* get id/vbus gpio resources */
+ 	ret = mtk_usb_extcon_gpio_init(extcon);
+ 	if (ret < 0)
+ 		dev_info(dev, "failed to init id/vbus pin\n");
+ 
+-#if IS_ENABLED(CONFIG_TCPC_CLASS)
+-	/* tcpc */
+-	ret = mtk_usb_extcon_tcpc_init(extcon);
+-	if (ret < 0)
+-		dev_err(dev, "failed to init tcpc\n");
+-#endif
+-
+ 	platform_set_drvdata(pdev, extcon);
+ 
+ 	return 0;
++
++destroy_workqueue:
++	destroy_workqueue(extcon->extcon_wq);
++	return ret;
+ }
+ 
+ static void mtk_usb_extcon_remove(struct platform_device *pdev)

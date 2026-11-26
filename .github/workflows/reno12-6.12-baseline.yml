@@ -115,13 +115,16 @@ jobs:
           tianma_panel="$GITHUB_WORKSPACE/ci-patches/0006-qqcandy-tianma-panel.patch"
           drm_headers="$GITHUB_WORKSPACE/ci-patches/0007-qqcandy-drm-ddk-headers.patch"
           drm_providers="$GITHUB_WORKSPACE/ci-patches/0008-qqcandy-drm-devapc-provider.patch"
+          typec_order="$GITHUB_WORKSPACE/ci-patches/0009-qqcandy-typec-recovery-order.patch"
+          usb_probe="$GITHUB_WORKSPACE/ci-patches/0010-qqcandy-usb-provider-probe.patch"
           fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
           printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
           git -C "$core" rev-parse HEAD
           git -C "$modules" rev-parse HEAD
           test "$(realpath -e "$(git -C "$core" rev-parse --show-toplevel)")" = "$core"
           sha256sum "$patch" "$fdt_fix" "$init_fix" "$usb_headers" "$pinctrl_headers" \
-            "$tianma_panel" "$drm_headers" "$drm_providers" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
+            "$tianma_panel" "$drm_headers" "$drm_providers" "$typec_order" "$usb_probe" \
+            "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
           git -C "$core" apply --check --verbose "$patch"
           git -C "$core" apply --verbose "$patch"
           git -C "$core" apply --check --verbose "$fdt_fix"
@@ -139,6 +142,10 @@ jobs:
           git -C "$modules_repo" apply --verbose "$drm_headers"
           git -C "$modules_repo" apply --check --verbose "$drm_providers"
           git -C "$modules_repo" apply --verbose "$drm_providers"
+          git -C "$modules_repo" apply --check --verbose "$typec_order"
+          git -C "$modules_repo" apply --verbose "$typec_order"
+          git -C "$modules_repo" apply --check --verbose "$usb_probe"
+          git -C "$modules_repo" apply --verbose "$usb_probe"
           git -C "$core" status --short
           grep -F 'static struct mfdt_ctx ctx __initdata' "$core/arch/arm64/kernel/mtk_embed_merge.c"
           grep -Fx 'config MTK_EMBED_BOARD_DTB' "$core/arch/arm64/Kconfig"
@@ -260,7 +267,8 @@ jobs:
           stage=../qqcandy-recovery-modules
           mkdir -p "$stage"
           cp -L -- "$(dirname "$deps")"/*.ko "$(dirname "$deps")"/modules.* "$base_archive" "$stage/"
-          for module in mediatek-drm.ko oplus21143_tianma_nt36672c_dsi_vdo.ko; do
+          for module in mediatek-drm.ko oplus21143_tianma_nt36672c_dsi_vdo.ko \
+            mt6375-adc.ko mtk_chg_type_det.ko tcpci_late_sync.ko; do
             test -s "$stage/$module"
           done
           tar tf "$stage/modules_staging_dir.tar.gz" > ../device_archive_files.log
