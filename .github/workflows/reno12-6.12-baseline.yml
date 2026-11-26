@@ -13,6 +13,7 @@ jobs:
       KERNEL_VERSION: kernel-6.12
       KLEAF_VERSION_FLAG: --//build/bazel_mgk_rules:kernel_version=6.12
       KLEAF_EMBED_FLAG: --//build/kernel/kleaf:defconfig_fragment=//kernel_device_modules-6.12:kernel/configs/qqcandy-embed.config
+      KLEAF_DISPLAY_FLAG: --define=CONFIG_TRUSTONIC_TEE_SUPPORT=n
       RECOVERY_MODULES_TARGET: //qqcandy_recovery:qqcandy_recovery_modules_install
     defaults:
       run:
@@ -118,6 +119,8 @@ jobs:
           typec_order="$GITHUB_WORKSPACE/ci-patches/0009-qqcandy-typec-recovery-order.patch"
           usb_probe="$GITHUB_WORKSPACE/ci-patches/0010-qqcandy-usb-provider-probe.patch"
           supplier_headers="$GITHUB_WORKSPACE/ci-patches/0011-qqcandy-drm-supplier-headers.patch"
+          dsi_drm="$GITHUB_WORKSPACE/ci-patches/0012-qqcandy-drm-dsi-no-tee.patch"
+          dvfsrc_headers="$GITHUB_WORKSPACE/ci-patches/0013-qqcandy-dvfsrc-ddk-headers.patch"
           fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
           printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
           git -C "$core" rev-parse HEAD
@@ -125,7 +128,7 @@ jobs:
           test "$(realpath -e "$(git -C "$core" rev-parse --show-toplevel)")" = "$core"
           sha256sum "$patch" "$fdt_fix" "$init_fix" "$usb_headers" "$pinctrl_headers" \
             "$tianma_panel" "$drm_headers" "$drm_providers" "$typec_order" "$usb_probe" "$supplier_headers" \
-            "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
+            "$dsi_drm" "$dvfsrc_headers" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
           git -C "$core" apply --check --verbose "$patch"
           git -C "$core" apply --verbose "$patch"
           git -C "$core" apply --check --verbose "$fdt_fix"
@@ -149,6 +152,10 @@ jobs:
           git -C "$modules_repo" apply --verbose "$usb_probe"
           git -C "$modules_repo" apply --check --verbose "$supplier_headers"
           git -C "$modules_repo" apply --verbose "$supplier_headers"
+          git -C "$modules_repo" apply --check --verbose "$dsi_drm"
+          git -C "$modules_repo" apply --verbose "$dsi_drm"
+          git -C "$modules_repo" apply --check --verbose "$dvfsrc_headers"
+          git -C "$modules_repo" apply --verbose "$dvfsrc_headers"
           git -C "$core" status --short
           grep -F 'static struct mfdt_ctx ctx __initdata' "$core/arch/arm64/kernel/mtk_embed_merge.c"
           grep -Fx 'config MTK_EMBED_BOARD_DTB' "$core/arch/arm64/Kconfig"
@@ -192,9 +199,9 @@ jobs:
           cd "$RUNNER_TEMP/ws/kernel"
           mkdir -p qqcandy_recovery
           install -m 644 "$GITHUB_WORKSPACE/ci-files/qqcandy-recovery.BUILD.bazel" qqcandy_recovery/BUILD.bazel
-          ./tools/bazel build "$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" --nobuild \
+          ./tools/bazel build "$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" "$KLEAF_DISPLAY_FLAG" --nobuild \
             "$RECOVERY_MODULES_TARGET" 2>&1 | tee ../recovery_analysis.log
-          ./tools/bazel build "$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" \
+          ./tools/bazel build "$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" "$KLEAF_DISPLAY_FLAG" \
             //kernel_device_modules-6.12:mgk_64_k612.user_config 2>&1 | tee ../device_config_build.log
           device_config_dir=bazel-bin/kernel_device_modules-6.12/mgk_64_k612.user_config/out_dir
           grep -Fx 'CONFIG_OPLUS_DDK_MTK=y' "$device_config_dir/.config"
@@ -206,7 +213,7 @@ jobs:
           package=kernel_device_modules-6.12
           image_target=mgk_64_k612_kernel_aarch64.user
           target="//$package:$image_target"
-          flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG")
+          flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" "$KLEAF_DISPLAY_FLAG")
           printf 'Target: %s\n' "$target"
           printf 'Bazel option: %s\n' "${flags[@]}"
 
@@ -254,7 +261,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/ws/kernel"
-          flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG")
+          flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" "$KLEAF_DISPLAY_FLAG")
           device_target=//kernel_device_modules-6.12:mgk_64_k612.user
           ./tools/bazel build "${flags[@]}" --keep_going "$RECOVERY_MODULES_TARGET" 2>&1 | tee ../recovery_build.log
           if grep -iE 'needs unknown symbol|disagrees about version|depmod: ERROR' ../recovery_build.log; then
@@ -271,9 +278,17 @@ jobs:
           mkdir -p "$stage"
           cp -L -- "$(dirname "$deps")"/*.ko "$(dirname "$deps")"/modules.* "$base_archive" "$stage/"
           for module in mediatek-drm.ko oplus21143_tianma_nt36672c_dsi_vdo.ko \
-            mt6375-adc.ko mtk_chg_type_det.ko tcpci_late_sync.ko; do
+            mt6375-adc.ko mtk_chg_type_det.ko tcpci_late_sync.ko mtk_wdt.ko \
+            mtk-dvfsrc.ko mtk-dvfsrc-regulator.ko mtk-dvfsrc-devfreq.ko mtk-emi.ko \
+            clk-mt6895-img.ko clk-mt6895-vcodec.ko clk-mt6895-cam.ko clk-mt6895-ccu.ko; do
             test -s "$stage/$module"
           done
+          test ! -e "$stage/mcDrvModule.ko"
+          nm -u "$stage/mediatek-drm.ko" > ../drm_undefined_symbols.log
+          if grep -iEq '[[:space:]]teec_' ../drm_undefined_symbols.log; then
+            echo 'The DSI build still imports the external display TEE backend' >&2
+            exit 1
+          fi
           tar tf "$stage/modules_staging_dir.tar.gz" > ../device_archive_files.log
           release="$(sed -E 's|^[.]/||' ../device_archive_files.log | awk -F/ '$1 == "lib" && $2 == "modules" && $3 != "" {print $3}' | sort -u)"
           test -n "$release"

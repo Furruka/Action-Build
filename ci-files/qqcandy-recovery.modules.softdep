@@ -1,0 +1,23 @@
+# MT6895 USB0 digital supply and MT6375 on the I2C bus.
+softdep spmi_mtk_pmif pre: clk_mt6895
+softdep mtk_spmi_pmic pre: spmi_mtk_pmif
+softdep mt6368_regulator pre: mtk_spmi_pmic
+softdep mt6363_regulator pre: mtk_spmi_pmic
+softdep mtu3 pre: mt6368_regulator phy_mtk_xsphy
+softdep i2c_mt65xx pre: clk_mt6895 clk_mt6895_bus clk_mt6895_peri pinctrl_mt6895
+softdep mt6375 pre: i2c_mt65xx
+softdep mt6375_adc pre: mt6375
+softdep tcpc_mt6375 pre: mt6375_adc
+softdep mt6375_charger pre: mt6375_adc
+softdep mtk_chg_type_det pre: tcpc_mt6375 mt6375_charger
+softdep extcon_mtk_usb pre: tcpc_mt6375 mt6375_charger
+softdep tcpci_late_sync pre: mtu3 mtk_chg_type_det extcon_mtk_usb
+
+# PWM clocks and DVFSRC children used by the internal display.
+softdep pwm_mtk_disp pre: clk_mt6895 clk_mt6895_peri
+softdep mtk_emi pre: mtk_dvfsrc
+softdep mtk_dvfsrc_regulator pre: mtk_dvfsrc
+softdep mmqos_mt6895 pre: mtk_emi
+softdep mtk_scpsys_mt6895 pre: clk_mt6895 clk_mt6895_mmsys clk_mt6895_mdpsys clk_mt6895_img clk_mt6895_vcodec clk_mt6895_cam clk_mt6895_ccu mt6315_regulator
+softdep oplus21143_tianma_nt36672c_dsi_vdo pre: mt6363_regulator i2c_mt65xx
+softdep mediatek_drm pre: mtk_dvfsrc_regulator oplus21143_tianma_nt36672c_dsi_vdo

@@ -1,3 +1,4 @@
+mtk_wdt.ko
 clk-mt6895.ko
 clk-mt6895-bus.ko
 clk-mt6895-peri.ko

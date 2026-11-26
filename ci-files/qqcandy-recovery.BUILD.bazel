@@ -43,22 +43,31 @@ _USB = [
     "drivers/regulator:mt6368-regulator",
     "drivers/spmi:spmi-mtk-pmif",
     "drivers/usb/mtu3:mtu3",
+    "drivers/watchdog:mtk_wdt",
 ]
 
 # The MT6895 board DT connects display through the MMSYS clock controllers,
 # SCPSYS, SMI, display IOMMU, MMQoS, command queue and MML. Include DT
 # suppliers explicitly because Linux module dependencies describe symbols.
 _DISPLAY = [
+    "drivers/clk/mediatek:clk-mt6895-cam",
+    "drivers/clk/mediatek:clk-mt6895-ccu",
+    "drivers/clk/mediatek:clk-mt6895-img",
     "drivers/clk/mediatek:clk-mt6895-mdpsys",
     "drivers/clk/mediatek:clk-mt6895-mmsys",
+    "drivers/clk/mediatek:clk-mt6895-vcodec",
+    "drivers/devfreq:mtk-dvfsrc-devfreq",
     "drivers/gpu/drm/mediatek/mediatek_v2:mediatek-drm",
     "drivers/gpu/drm/mediatek/mediatek_v2:mtk_panel_ext",
     "drivers/gpu/drm/mediatek/mml:mtk-mml-mt6895",
     "drivers/gpu/drm/panel:oplus21143_tianma_nt36672c_dsi_vdo",
     "drivers/interconnect/mediatek:mmqos-mt6895",
+    "drivers/interconnect/mediatek:mtk-emi",
     "drivers/iommu:mtk_iommu",
     "drivers/leds:leds-mtk-disp",
     "drivers/pwm:pwm-mtk-disp",
+    "drivers/regulator:mtk-dvfsrc-regulator",
+    "drivers/soc/mediatek:mtk-dvfsrc",
     "drivers/soc/mediatek:mtk-scpsys-mt6895",
 ]
 
@@ -115,7 +124,6 @@ _DISPLAY_DEPENDENCIES = [
     "drivers/soc/oplus/boot:buildvariant",
     "drivers/soc/oplus/boot:oplus_bsp_boot_projectinfo",
     "drivers/soc/oplus/boot:oplusboot",
-    "drivers/tee/gud:mcDrvModule",
     "sound/soc/mediatek/common:mtk-afe-external",
 ]
 
