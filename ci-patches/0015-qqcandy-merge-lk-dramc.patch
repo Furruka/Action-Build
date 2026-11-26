@@ -1,0 +1,45 @@
+diff --git a/arch/arm64/kernel/mtk_embed_merge.c b/arch/arm64/kernel/mtk_embed_merge.c
+--- a/arch/arm64/kernel/mtk_embed_merge.c
++++ b/arch/arm64/kernel/mtk_embed_merge.c
+@@ -316,6 +316,33 @@
+ 	return 0;
+ }
+ 
++/* LK adds the trained DRAM geometry and DVFS steps for the installed part. */
++static void __init mfdt_merge_dramc(struct mfdt_ctx *c)
++{
++	static const char path[] = "/soc/dramc@10230000";
++	static const char *const props[] = {
++		"dram_type", "support_ch_cnt", "ch_cnt", "rk_cnt", "mr_cnt",
++		"freq_cnt", "rk_size", "mr", "freq_step",
++	};
++	int lk = fdt_path_offset(c->lk, path);
++	int d = fdt_path_offset(c->dst, path);
++	size_t i;
++
++	if (lk < 0 || d < 0 ||
++	    fdt_node_check_compatible(c->lk, lk, "mediatek,mt6895-dramc") ||
++	    fdt_node_check_compatible(c->dst, d, "mediatek,mt6895-dramc"))
++		return;
++
++	for (i = 0; i < ARRAY_SIZE(props); i++) {
++		const void *val;
++		int len;
++
++		val = fdt_getprop(c->lk, lk, props[i], &len);
++		if (val)
++			mfdt_status(c, fdt_setprop(c->dst, d, props[i], val, len));
++	}
++}
++
+ static void __init mfdt_copy_whole(struct mfdt_ctx *c, const char *path)
+ {
+ 	int lk = fdt_path_offset(c->lk, path);
+@@ -382,6 +409,7 @@
+ 	mfdt_merge_memory(c);
+ 	mfdt_merge_chosen(c);
+ 	mfdt_merge_node_props(c, "/soc/mddriver");
++	mfdt_merge_dramc(c);
+ 	mfdt_merge_reserved(c);
+ 	mfdt_merge_memregions(c);
+ 	mfdt_copy_whole(c, "/bootprof");

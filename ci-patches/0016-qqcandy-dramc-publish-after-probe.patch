@@ -1,0 +1,133 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/memory/mediatek/dramc.c b/kernel/kernel_device_modules-6.12/drivers/memory/mediatek/dramc.c
+--- a/kernel/kernel_device_modules-6.12/drivers/memory/mediatek/dramc.c
++++ b/kernel/kernel_device_modules-6.12/drivers/memory/mediatek/dramc.c
+@@ -21,6 +21,14 @@
+ static struct platform_device *dramc_pdev;
+ static struct platform_driver dramc_drv;
+ static struct regulator *reg_vdram2;
++
++/* A registered driver may have no successfully probed DRAMC device yet. */
++static struct dramc_dev_t *dramc_get_data(void)
++{
++	struct platform_device *pdev = smp_load_acquire(&dramc_pdev);
++
++	return pdev ? platform_get_drvdata(pdev) : NULL;
++}
+ 
+ static int mr4_v1_init(struct platform_device *pdev,
+ 	struct mr4_dev_t *mr4_dev_ptr)
+@@ -156,11 +164,14 @@
+ 
+ static ssize_t mr_show(struct device_driver *driver, char *buf)
+ {
+-	struct dramc_dev_t *dramc_dev_ptr =
+-		(struct dramc_dev_t *)platform_get_drvdata(dramc_pdev);
+-	struct mr_info_t *mr_info_ptr = dramc_dev_ptr->mr_info_ptr;
++	struct dramc_dev_t *dramc_dev_ptr = dramc_get_data();
++	struct mr_info_t *mr_info_ptr;
+ 	unsigned int i;
+ 	ssize_t ret;
++
++	if (!dramc_dev_ptr)
++		return -ENODEV;
++	mr_info_ptr = dramc_dev_ptr->mr_info_ptr;
+ 
+ 	for (ret = 0, i = 0; i < dramc_dev_ptr->mr_cnt; i++) {
+ 		ret += snprintf(buf + ret, PAGE_SIZE - ret, "mr%d: 0x%x\n",
+@@ -174,10 +185,12 @@
+ 
+ static ssize_t mr4_show(struct device_driver *driver, char *buf)
+ {
+-	struct dramc_dev_t *dramc_dev_ptr =
+-		(struct dramc_dev_t *)platform_get_drvdata(dramc_pdev);
++	struct dramc_dev_t *dramc_dev_ptr = dramc_get_data();
+ 	unsigned int i;
+ 	ssize_t ret;
++
++	if (!dramc_dev_ptr)
++		return -ENODEV;
+ 
+ 	for (ret = 0, i = 0; i < dramc_dev_ptr->ch_cnt; i++) {
+ 		ret += snprintf(buf + ret, PAGE_SIZE - ret,
+@@ -238,8 +251,7 @@
+ 	int ret;
+ 
+ 	pr_info("%s: module probe.\n", __func__);
+-	dramc_pdev = pdev;
+-	dramc_dev_ptr = devm_kmalloc(&pdev->dev,
++	dramc_dev_ptr = devm_kzalloc(&pdev->dev,
+ 		sizeof(struct dramc_dev_t), GFP_KERNEL);
+ 
+ 	if (!dramc_dev_ptr)
+@@ -530,6 +542,7 @@
+ 	}
+ 
+ 	platform_set_drvdata(pdev, dramc_dev_ptr);
++	smp_store_release(&dramc_pdev, pdev);
+ 	pr_info("%s: DRAM data type = %d\n", __func__,
+ 		mtk_dramc_get_ddr_type());
+ 
+@@ -548,11 +561,9 @@
+ {
+ 	struct dramc_dev_t *dramc_dev_ptr;
+ 
+-	if (!dramc_pdev)
++	dramc_dev_ptr = dramc_get_data();
++	if (!dramc_dev_ptr)
+ 		return -1;
+-
+-	dramc_dev_ptr =
+-		(struct dramc_dev_t *)platform_get_drvdata(dramc_pdev);
+ 
+ 	if (step < dramc_dev_ptr->freq_cnt)
+ 		return dramc_dev_ptr->freq_step[step];
+@@ -1017,11 +1028,9 @@
+ 	struct dramc_dev_t *dramc_dev_ptr;
+ 	struct fmeter_dev_t *fmeter_dev_ptr;
+ 
+-	if (!dramc_pdev)
++	dramc_dev_ptr = dramc_get_data();
++	if (!dramc_dev_ptr)
+ 		return 0;
+-
+-	dramc_dev_ptr =
+-		(struct dramc_dev_t *)platform_get_drvdata(dramc_pdev);
+ 
+ 	fmeter_dev_ptr = (struct fmeter_dev_t *)dramc_dev_ptr->fmeter_dev_ptr;
+ 	if (!fmeter_dev_ptr)
+@@ -1062,11 +1071,9 @@
+ 	struct dramc_dev_t *dramc_dev_ptr;
+ 	struct mr4_dev_t *mr4_dev_ptr;
+ 
+-	if (!dramc_pdev)
++	dramc_dev_ptr = dramc_get_data();
++	if (!dramc_dev_ptr)
+ 		return 0;
+-
+-	dramc_dev_ptr =
+-		(struct dramc_dev_t *)platform_get_drvdata(dramc_pdev);
+ 
+ 	mr4_dev_ptr = (struct mr4_dev_t *)dramc_dev_ptr->mr4_dev_ptr;
+ 	if (!mr4_dev_ptr)
+@@ -1091,10 +1098,9 @@
+ {
+ 	struct dramc_dev_t *dramc_dev_ptr;
+ 
+-	if (!dramc_pdev)
++	dramc_dev_ptr = dramc_get_data();
++	if (!dramc_dev_ptr)
+ 		return 0;
+-	dramc_dev_ptr =
+-		(struct dramc_dev_t *)platform_get_drvdata(dramc_pdev);
+ 
+ 	return dramc_dev_ptr->dram_type;
+ }
+@@ -1102,7 +1108,7 @@
+ 
+ static void dramc_remove(struct platform_device *pdev)
+ {
+-	dramc_pdev = NULL;
++	WRITE_ONCE(dramc_pdev, NULL);
+ }
+ 
+ static const struct of_device_id dramc_of_ids[] = {
