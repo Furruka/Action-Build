@@ -1,0 +1,102 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_drm_drv.c b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_drm_drv.c
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_drm_drv.c
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_drm_drv.c
+@@ -10532,10 +10532,6 @@
+ 
+ 	DDPINFO("%s-\n", __func__);
+ 
+-	private->lateinit.worker = kthread_create_worker(0, "mtk_drm_bind");
+-	kthread_init_work(&private->lateinit.work, mtk_drm_kms_lateinit);
+-	kthread_queue_work(private->lateinit.worker, &private->lateinit.work);
+-
+ 	return 0;
+ 
+ 	if (private->dma_parms_allocated)
+@@ -10546,6 +10542,7 @@
+ 	component_unbind_all(drm->dev, drm);
+ err_config_cleanup:
+ 	drm_mode_config_cleanup(drm);
++	memset(private->crtc, 0, sizeof(private->crtc));
+ 
+ 	return ret;
+ }
+@@ -10553,6 +10550,13 @@
+ static void mtk_drm_kms_deinit(struct drm_device *drm)
+ {
+ 	struct mtk_drm_private *private = drm->dev_private;
++
++	if (private->lateinit.worker) {
++		kthread_destroy_worker(private->lateinit.worker);
++		private->lateinit.worker = NULL;
++		disp_dbg_deinit();
++		PanelMaster_Deinit();
++	}
+ 
+ 	drm_kms_helper_poll_fini(drm);
+ 
+@@ -10562,9 +10566,7 @@
+ 	//drm_vblank_cleanup(drm);
+ 	component_unbind_all(drm->dev, drm);
+ 	drm_mode_config_cleanup(drm);
+-
+-	disp_dbg_deinit();
+-	PanelMaster_Deinit();
++	memset(private->crtc, 0, sizeof(private->crtc));
+ 
+ 	if (private->mml_ctx) {
+ 		mml_drm_kick_done(private->mml_ctx);
+@@ -11746,7 +11748,16 @@
+ 	if (ret < 0)
+ 		goto err_deinit;
+ 
++	private->lateinit.worker = kthread_create_worker(0, "mtk_drm_bind");
++	if (IS_ERR(private->lateinit.worker)) {
++		ret = PTR_ERR(private->lateinit.worker);
++		private->lateinit.worker = NULL;
++		goto err_unregister;
++	}
++
+ 	mtk_layering_rule_init(drm);
++	kthread_init_work(&private->lateinit.work, mtk_drm_kms_lateinit);
++	kthread_queue_work(private->lateinit.worker, &private->lateinit.work);
+ #ifdef DRM_OVL_SELF_PATTERN
+ 	mtk_drm_disp_test_init(drm);
+ 	mtk_drm_disp_test_show(test_crtc, 1);
+@@ -11755,6 +11766,8 @@
+ 
+ 	return 0;
+ 
++err_unregister:
++	drm_dev_unregister(drm);
+ err_deinit:
+ 	mtk_drm_kms_deinit(drm);
+ err_free:
+@@ -11766,10 +11779,12 @@
+ static void mtk_drm_unbind(struct device *dev)
+ {
+ 	struct mtk_drm_private *private = dev_get_drvdata(dev);
+-
+-	drm_dev_unregister(private->drm);
+-	drm_dev_put(private->drm);
++	struct drm_device *drm = private->drm;
++
++	drm_dev_unregister(drm);
++	mtk_drm_kms_deinit(drm);
+ 	private->drm = NULL;
++	drm_dev_put(drm);
+ }
+ 
+ static const struct component_master_ops mtk_drm_ops = {
+@@ -13517,12 +13532,7 @@
+ static void mtk_drm_remove(struct platform_device *pdev)
+ {
+ 	struct mtk_drm_private *private = platform_get_drvdata(pdev);
+-	struct drm_device *drm = private->drm;
+ 	int i;
+-
+-	drm_dev_unregister(drm);
+-	mtk_drm_kms_deinit(drm);
+-	drm_dev_put(drm);
+ 
+ 	component_master_del(&pdev->dev, &mtk_drm_ops);
+ 
