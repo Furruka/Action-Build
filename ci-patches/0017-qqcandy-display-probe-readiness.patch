@@ -1,0 +1,927 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/interconnect/mediatek/mmqos-mtk.c b/kernel/kernel_device_modules-6.12/drivers/interconnect/mediatek/mmqos-mtk.c
+--- a/kernel/kernel_device_modules-6.12/drivers/interconnect/mediatek/mmqos-mtk.c
++++ b/kernel/kernel_device_modules-6.12/drivers/interconnect/mediatek/mmqos-mtk.c
+@@ -372,14 +372,19 @@
+ 
+ void mtk_mmqos_is_dualpipe_enable(bool is_enable)
+ {
+-	gmmqos->dual_pipe_enable = is_enable;
+-	pr_notice("%s: %d\n", __func__, gmmqos->dual_pipe_enable);
++	struct mtk_mmqos *mmqos = smp_load_acquire(&gmmqos);
++
++	if (!mmqos)
++		return;
++
++	mmqos->dual_pipe_enable = is_enable;
++	pr_notice("%s: %d\n", __func__, is_enable);
+ }
+ EXPORT_SYMBOL_GPL(mtk_mmqos_is_dualpipe_enable);
+ 
+ s32 mtk_mmqos_system_qos_update(unsigned short qos_status)
+ {
+-	struct mtk_mmqos *mmqos = gmmqos;
++	struct mtk_mmqos *mmqos = smp_load_acquire(&gmmqos);
+ 
+ 	if (IS_ERR_OR_NULL(mmqos)) {
+ 		pr_notice("%s is not ready\n", __func__);
+@@ -2298,7 +2303,7 @@
+ {
+ 	u32 larb_id = 0;
+ 
+-	if (mmqos_state == MMQOS_DISABLE) {
++	if (!smp_load_acquire(&gmmqos) || mmqos_state == MMQOS_DISABLE) {
+ 		MMQOS_DBG("mmqos not enable");
+ 		return;
+ 	}
+@@ -2391,6 +2396,30 @@
+ 			return larb_ssc_ostdl->sub_comm_port[i];
+ 	}
+ 	return -1;
++}
++
++static void mmqos_put_device(void *data)
++{
++	put_device(data);
++}
++
++static struct device *mmqos_get_smi_supplier(struct device *consumer,
++					    struct platform_device *supplier)
++{
++	struct device *dev;
++	int ret;
++
++	if (!supplier)
++		return ERR_PTR(-EPROBE_DEFER);
++
++	dev = &supplier->dev;
++	if (!dev_get_drvdata(dev)) {
++		put_device(dev);
++		return ERR_PTR(-EPROBE_DEFER);
++	}
++
++	ret = devm_add_action_or_reset(consumer, mmqos_put_device, dev);
++	return ret ? ERR_PTR(ret) : dev;
+ }
+ 
+ static bool mmqos_met_not_freerun;
+@@ -2427,27 +2456,11 @@
+ 	mmqos = devm_kzalloc(&pdev->dev, sizeof(*mmqos), GFP_KERNEL);
+ 	if (!mmqos)
+ 		return -ENOMEM;
+-	gmmqos = mmqos;
+-
+ 	mmqos->dev = &pdev->dev;
+ 	smi_imu = devm_kzalloc(&pdev->dev, sizeof(*smi_imu), GFP_KERNEL);
+ 	if (!smi_imu)
+ 		return -ENOMEM;
+ 
+-	last_rec = kzalloc(sizeof(*last_rec), GFP_KERNEL);
+-	if (!last_rec)
+-		return -ENOMEM;
+-
+-#if IS_ENABLED(CONFIG_MTK_AEE_IPANIC) && IS_ENABLED(CONFIG_ARM64)
+-	va = (unsigned long) last_rec;
+-	pa = __pa_nodebug(va);
+-	if (va && pa) {
+-		ret = mrdump_mini_add_extra_file(va, pa, PAGE_SIZE, "LAST_MMQOS");
+-		if (ret)
+-			MMQOS_DBG("failed:%d va:%#lx pa:%pa", ret, va, &pa);
+-	}
+-#endif
+-
+ 	chn_bw_rec = devm_kzalloc(&pdev->dev,
+ 		sizeof(*chn_bw_rec), GFP_KERNEL);
+ 	if (!chn_bw_rec)
+@@ -2466,23 +2479,30 @@
+ 	larb_ssc_ostdl.size = 0;
+ 	of_for_each_phandle(
+ 		&it, ret, pdev->dev.of_node, "mediatek,larbs-supply", NULL, 0) {
+-		np = of_node_get(it.node);
++		np = it.node;
+ 		if (!of_device_is_available(np))
+ 			continue;
+ 		larb_pdev = of_find_device_by_node(np);
+ 		if (!larb_pdev) {
+-			larb_pdev = of_platform_device_create(
+-				np, NULL, &pdev->dev);
+-			if (!larb_pdev || !larb_pdev->dev.driver) {
+-				of_node_put(np);
+-				return -EPROBE_DEFER;
+-			}
++			larb_pdev = of_platform_device_create(np, NULL, &pdev->dev);
++			if (larb_pdev)
++				get_device(&larb_pdev->dev);
++		}
++		larb_dev = mmqos_get_smi_supplier(&pdev->dev, larb_pdev);
++		if (IS_ERR(larb_dev)) {
++			of_node_put(np);
++			return PTR_ERR(larb_dev);
+ 		}
+ 		if (of_property_read_u32(np, "mediatek,larb-id", &id))
+ 			id = num_larbs;
+-		smi_imu->larb_imu[id].dev = &larb_pdev->dev;
+-		if (!of_parse_phandle_with_fixed_args(np, "mediatek,smi-ssc-ostdl", 1, 0, &args)
+-			&& larb_ssc_ostdl.size < MMQOS_MAX_LARB_SSC_OSTDL) {
++		if ((unsigned int)id >= MTK_LARB_NR_MAX) {
++			of_node_put(np);
++			return -EINVAL;
++		}
++		smi_imu->larb_imu[id].dev = larb_dev;
++		if (larb_ssc_ostdl.size < MMQOS_MAX_LARB_SSC_OSTDL &&
++		    !of_parse_phandle_with_fixed_args(np, "mediatek,smi-ssc-ostdl", 1, 0, &args)) {
++			of_node_put(args.np);
+ 			larb_ssc_ostdl.larb_ids[larb_ssc_ostdl.size] = id;
+ 			larb_ssc_ostdl.sub_comm_port[larb_ssc_ostdl.size] = args.args[0];
+ 			MMQOS_DBG("larb id:%d sub comm:%d", id,
+@@ -2570,7 +2590,7 @@
+ 			INIT_LIST_HEAD(&comm_node->list);
+ 			list_add_tail(&comm_node->list, &mmqos->comm_list);
+ 			INIT_LIST_HEAD(&comm_node->comm_port_list);
+-			comm_node->icc_path = of_icc_get(&pdev->dev,
++			comm_node->icc_path = devm_of_icc_get(&pdev->dev,
+ 				mmqos_desc->comm_icc_path_names[
+ 						MASK_8(node->id)]);
+ 			if (IS_ERR_OR_NULL(comm_node->icc_path)) {
+@@ -2578,10 +2598,10 @@
+ 					"get icc_path fail:%s\n",
+ 					mmqos_desc->comm_icc_path_names[
+ 						MASK_8(node->id)]);
+-				ret = -EINVAL;
++				ret = comm_node->icc_path ? PTR_ERR(comm_node->icc_path) : -EINVAL;
+ 				goto err;
+ 			}
+-			comm_node->icc_hrt_path = of_icc_get(&pdev->dev,
++			comm_node->icc_hrt_path = devm_of_icc_get(&pdev->dev,
+ 				mmqos_desc->comm_icc_hrt_path_names[
+ 						MASK_8(node->id)]);
+ 			if (IS_ERR_OR_NULL(comm_node->icc_hrt_path)) {
+@@ -2589,23 +2609,27 @@
+ 					"get icc_hrt_path fail:%s\n",
+ 					mmqos_desc->comm_icc_hrt_path_names[
+ 						MASK_8(node->id)]);
+-				ret = -EINVAL;
++				ret = comm_node->icc_hrt_path ?
++					PTR_ERR(comm_node->icc_hrt_path) : -EINVAL;
+ 				goto err;
+ 			}
+ 			np = of_parse_phandle(pdev->dev.of_node,
+ 					      "mediatek,commons-supply",
+ 					      MASK_8(node->id));
+ 			if (!of_device_is_available(np)) {
+-				pr_notice("get common(%d) dev fail\n",
+-					  MASK_8(node->id));
+-				break;
++				of_node_put(np);
++				dev_notice(&pdev->dev, "common(%d) supplier unavailable\n",
++					   MASK_8(node->id));
++				ret = -EINVAL;
++				goto err;
+ 			}
+ 			comm_pdev = of_find_device_by_node(np);
+-			if (comm_pdev)
+-				comm_node->comm_dev = &comm_pdev->dev;
+-			else
+-				pr_notice("comm(%d) pdev is null\n",
+-					  MASK_8(node->id));
++			of_node_put(np);
++			comm_node->comm_dev = mmqos_get_smi_supplier(&pdev->dev, comm_pdev);
++			if (IS_ERR(comm_node->comm_dev)) {
++				ret = PTR_ERR(comm_node->comm_dev);
++				goto err;
++			}
+ 			comm_node->comm_reg =
+ 				devm_regulator_get_optional(comm_node->comm_dev,
+ 						   "mmdvfs-dvfsrc-vcore");
+@@ -2661,8 +2685,6 @@
+ 			larb_node->channel_v2 = comm_port_node->channel_v2;
+ 			larb_node->is_write = node_desc->is_write;
+ 			larb_node->bw_ratio = node_desc->bw_ratio;
+-			/* init disable dualpipe */
+-			gmmqos->dual_pipe_enable = false;
+ 
+ 			for (j = 0; j < MMQOS_MAX_REPORT_LARB_NUM; j++) {
+ 				if (node->id == mmqos_desc->report_bw_larbs[j]) {
+@@ -2700,8 +2722,6 @@
+ 		data->nodes[i] = node;
+ 	}
+ 	data->num_nodes = mmqos_desc->num_nodes;
+-	mmqos->prov.data = data;
+-
+ 
+ 	mmqos->max_ratio = mmqos_desc->max_ratio;
+ 	if (mmqos_desc->max_disp_ostdl == 0)
+@@ -2761,18 +2781,40 @@
+ #endif
+ 	MMQOS_DBG("hrt_total_bw: %d", hrt->hrt_total_bw);
+ 
++	/* The crash dump registry can retain this address for the boot. */
++	if (!last_rec) {
++		last_rec = kzalloc(PAGE_SIZE, GFP_KERNEL);
++		if (!last_rec) {
++			ret = -ENOMEM;
++			goto err;
++		}
++
++#if IS_ENABLED(CONFIG_MTK_AEE_IPANIC) && IS_ENABLED(CONFIG_ARM64)
++		va = (unsigned long)last_rec;
++		pa = __pa_nodebug(va);
++		if (pa) {
++			ret = mrdump_mini_add_extra_file(va, pa, PAGE_SIZE, "LAST_MMQOS");
++			if (ret)
++				MMQOS_DBG("failed:%d va:%#lx pa:%pa", ret, va, &pa);
++		}
++#endif
++	}
+ 	hrt->md_scen = mmqos_desc->md_scen;
+ 	mtk_mmqos_init_hrt(hrt);
+ 	g_hrt = hrt;
++	rt_mutex_init(&mmqos->bw_lock);
++	platform_set_drvdata(pdev, mmqos);
++
++	/* Expose the topology only after the bandwidth state is usable. */
++	smp_store_release(&gmmqos, mmqos);
++	smp_store_release(&mmqos->prov.data, data);
++
+ 	mmqos->nb.notifier_call = update_mm_clk;
+ 	register_mmdvfs_notifier(&mmqos->nb);
+ 	ret = mtk_mmqos_register_hrt_sysfs(&pdev->dev);
+ 	if (ret)
+ 		dev_notice(&pdev->dev, "sysfs create fail\n");
+-	platform_set_drvdata(pdev, mmqos);
+ 	devm_kfree(&pdev->dev, smi_imu);
+-
+-	rt_mutex_init(&gmmqos->bw_lock);
+ 
+ 	/* create proc file */
+ 	dir = proc_mkdir("mmqos", NULL);
+@@ -2820,6 +2862,8 @@
+ 	int ret, probe_ret;
+ 
+ 	probe_ret = mtk_mmqos_probe(pdev);
++	if (probe_ret)
++		return probe_ret;
+ 
+ 	ret = of_property_read_u32(pdev->dev.of_node, "vmmrc-base", &base_tmp);
+ 	if (ret >= 0) {
+@@ -2941,9 +2985,13 @@
+ 	//destroy_workqueue(mmqos->wq);
+ 	mtk_mmqos_unregister_hrt_sysfs(&pdev->dev);
+ 
+-	/* destroy work queue */
+-	cancel_delayed_work_sync(&mmqos_delayed_work);
+-	destroy_workqueue(mmqos_wq);
++	if (mmqos_wq) {
++		cancel_delayed_work_sync(&mmqos_delayed_work);
++		destroy_workqueue(mmqos_wq);
++		mmqos_wq = NULL;
++	}
++
++	WRITE_ONCE(gmmqos, NULL);
+ }
+ 
+ void clear_chnn_bw(void)
+@@ -3442,15 +3490,18 @@
+ 
+ struct device *get_larb_dev(int larb_id)
+ {
++	struct mtk_mmqos *mmqos = smp_load_acquire(&gmmqos);
+ 	struct icc_onecell_data *icc_data;
+ 	struct icc_node *node;
+ 	struct larb_node *larb_node;
+ 	int i;
+ 
+-	if (larb_id < 0)
++	if (larb_id < 0 || !mmqos)
+ 		return NULL;
+ 
+-	icc_data = (struct icc_onecell_data *)gmmqos->prov.data;
++	icc_data = smp_load_acquire(&mmqos->prov.data);
++	if (!icc_data)
++		return NULL;
+ 	for (i = 0; i < icc_data->num_nodes; i++)
+ 		if (icc_data->nodes[i]->id == SLAVE_LARB(larb_id)) {
+ 			node = icc_data->nodes[i];
+diff --git a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/mtk-interconnect/core.c b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/mtk-interconnect/core.c
+--- a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/mtk-interconnect/core.c
++++ b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/mtk-interconnect/core.c
+@@ -368,7 +368,7 @@
+ 	rt_mutex_lock(&icc_lock);
+ 	list_for_each_entry(provider, &icc_providers, provider_list) {
+ 		if (provider->dev->of_node == spec->np)
+-			node = provider->xlate(spec, provider->data);
++			node = provider->xlate(spec, smp_load_acquire(&provider->data));
+ 		if (!IS_ERR(node))
+ 			break;
+ 	}
+diff --git a/kernel/kernel_device_modules-6.12/drivers/memory/mtk-smi.c b/kernel/kernel_device_modules-6.12/drivers/memory/mtk-smi.c
+--- a/kernel/kernel_device_modules-6.12/drivers/memory/mtk-smi.c
++++ b/kernel/kernel_device_modules-6.12/drivers/memory/mtk-smi.c
+@@ -385,9 +385,15 @@
+ 
+ void mtk_smi_common_bw_set(struct device *dev, const u32 port, const u32 val)
+ {
+-	struct mtk_smi_larb *larb = dev_get_drvdata(dev);
+-	struct mtk_smi *common = dev_get_drvdata(larb->smi_common);
++	struct mtk_smi_larb *larb = dev ? dev_get_drvdata(dev) : NULL;
++	struct mtk_smi *common;
+ 	u32 orig_val, write_val;
++
++	if (!larb || !larb->smi_common)
++		return;
++	common = dev_get_drvdata(larb->smi_common);
++	if (!common)
++		return;
+ 
+ 	if (port >= SMI_COMMON_LARB_NR_MAX) { /* max: 8 input larbs. */
+ 		dev_notice(dev, "%s port invalid:%d, val:%u.\n", __func__,
+@@ -426,9 +432,15 @@
+ 
+ void mtk_smi_common_ostdl_set(struct device *dev, const u32 port, bool is_write, const u32 val)
+ {
+-	struct mtk_smi_larb *larb = dev_get_drvdata(dev);
+-	struct mtk_smi *common = dev_get_drvdata(larb->smi_common);
++	struct mtk_smi_larb *larb = dev ? dev_get_drvdata(dev) : NULL;
++	struct mtk_smi *common;
+ 	u32 orig_val, write_val;
++
++	if (!larb || !larb->smi_common)
++		return;
++	common = dev_get_drvdata(larb->smi_common);
++	if (!common)
++		return;
+ 
+ 	if (port >= SMI_COMMON_LARB_NR_MAX) { /* max: 8 input larbs. */
+ 		dev_notice(dev, "%s port invalid:%d, val:%u.\n", __func__,
+@@ -473,7 +485,10 @@
+ 
+ void mtk_smi_larb_bw_set(struct device *dev, const u32 port, const u32 val)
+ {
+-	struct mtk_smi_larb *larb = dev_get_drvdata(dev);
++	struct mtk_smi_larb *larb = dev ? dev_get_drvdata(dev) : NULL;
++
++	if (!larb)
++		return;
+ 
+ 	if (port >= SMI_LARB_PORT_NR_MAX) { /* max: 32 ports for a larb */
+ 		dev_notice(dev, "%s port invalid:%d, val:%u.\n", __func__,
+@@ -499,7 +514,10 @@
+ 
+ void mtk_smi_larb_port_dis_ultra(struct device *dev, const u32 port, bool is_dis_ultra)
+ {
+-	struct mtk_smi_larb *larb = dev_get_drvdata(dev);
++	struct mtk_smi_larb *larb = dev ? dev_get_drvdata(dev) : NULL;
++
++	if (!larb)
++		return;
+ 
+ 	if (port >= SMI_LARB_PORT_NR_MAX) { /* max: 32 ports for a larb */
+ 		dev_notice(dev, "%s port invalid:%d\n", __func__,
+@@ -562,7 +580,10 @@
+ 
+ void mtk_smi_set_hrt_perm(struct device *dev, const u32 port, bool is_hrt)
+ {
+-	struct mtk_smi_larb *larb = dev_get_drvdata(dev);
++	struct mtk_smi_larb *larb = dev ? dev_get_drvdata(dev) : NULL;
++
++	if (!larb)
++		return;
+ 
+ 	if (port >= SMI_LARB_PORT_NR_MAX) { /* max: 32 ports for a larb */
+ 		dev_notice(dev, "%s port invalid:%d\n", __func__,
+diff --git a/kernel/kernel_device_modules-6.12/drivers/soc/mediatek/mtk-mmdvfs.c b/kernel/kernel_device_modules-6.12/drivers/soc/mediatek/mtk-mmdvfs.c
+--- a/kernel/kernel_device_modules-6.12/drivers/soc/mediatek/mtk-mmdvfs.c
++++ b/kernel/kernel_device_modules-6.12/drivers/soc/mediatek/mtk-mmdvfs.c
+@@ -75,8 +75,6 @@
+ 	bool mmdvfs_v3_vcp_cb_ready;
+ };
+ 
+-static struct regulator *vcore_reg_id;
+-
+ #define MMDVFS_RECORD_NUM (10)
+ struct mmdvfs_opp_record {
+ 	struct notifier_block nb;
+@@ -85,7 +83,7 @@
+ 	u8 opp_level[MMDVFS_RECORD_NUM];
+ };
+ 
+-static struct mmdvfs_opp_record *mmdvfs_dbg;
++static struct mmdvfs_opp_record mmdvfs_dbg;
+ 
+ static u32 log_level;
+ enum mmdvfs_log_level {
+@@ -225,13 +223,13 @@
+ 	int i;
+ 
+ 	pr_notice("[smi] mmdvfs dump opp level start\n");
+-	for (i = mmdvfs_dbg->idx; i < MMDVFS_RECORD_NUM; i++) {
++	for (i = mmdvfs_dbg.idx; i < MMDVFS_RECORD_NUM; i++) {
+ 		pr_notice("[smi] (time, opp_level) = (%18llu, %d))\n",
+-				mmdvfs_dbg->time[i], mmdvfs_dbg->opp_level[i]);
+-	}
+-	for (i = 0; i < mmdvfs_dbg->idx; i++) {
++				mmdvfs_dbg.time[i], mmdvfs_dbg.opp_level[i]);
++	}
++	for (i = 0; i < mmdvfs_dbg.idx; i++) {
+ 		pr_notice("[smi] (time, opp_level) = (%18llu, %d))\n",
+-				mmdvfs_dbg->time[i], mmdvfs_dbg->opp_level[i]);
++				mmdvfs_dbg.time[i], mmdvfs_dbg.opp_level[i]);
+ 	}
+ 	pr_notice("[smi] mmdvfs opp level end\n");
+ 
+@@ -254,7 +252,7 @@
+ 		opp_level = 0;
+ 
+ 	if (drv_data->ccf_ena_support && ap_ccf_mutex)
+-		mmdvfs_set_ccf_enable_mutex(true);
++		mutex_lock(&drv_data->ccf_enable_mutex);
+ 	mutex_lock(&drv_data->lp_mutex);
+ 	do {
+ 		if (drv_data->ccf_ena_support) {
+@@ -294,16 +292,16 @@
+ 	} while (0);
+ 	mutex_unlock(&drv_data->lp_mutex);
+ 	if (drv_data->ccf_ena_support && ap_ccf_mutex)
+-		mmdvfs_set_ccf_enable_mutex(false);
++		mutex_unlock(&drv_data->ccf_enable_mutex);
+ 
+ 	blocking_notifier_call_chain(&mmdvfs_notifier_list, opp_level, NULL);
+ 	if (log_level & 1 << log_freq)
+ 		pr_notice("set clk to opp level:%d\n", opp_level);
+ 
+ 	/* Record mmdvfs opp log*/
+-	mmdvfs_dbg->time[mmdvfs_dbg->idx] = ktime_get();
+-	mmdvfs_dbg->opp_level[mmdvfs_dbg->idx] = opp_level;
+-	mmdvfs_dbg->idx = (mmdvfs_dbg->idx + 1) % MMDVFS_RECORD_NUM;
++	mmdvfs_dbg.time[mmdvfs_dbg.idx] = ktime_get();
++	mmdvfs_dbg.opp_level[mmdvfs_dbg.idx] = opp_level;
++	mmdvfs_dbg.idx = (mmdvfs_dbg.idx + 1) % MMDVFS_RECORD_NUM;
+ 	if (record_opp_fp) {
+ 		record_opp_fp(opp_level);
+ 	}
+@@ -381,6 +379,7 @@
+ struct mmdvfs_dbg_data {
+ 	struct mmdvfs_drv_data *drv_data;
+ 	struct regulator *reg;
++	struct regulator *vcore_reg;
+ 	s32 force_step;
+ 	s32 vote_step;
+ 	bool is_notifier_registered;
+@@ -388,7 +387,12 @@
+ 	struct clk *aov_clk[AOV_CLK_NUM];
+ };
+ 
+-struct mmdvfs_dbg_data *dbg_data;
++static struct mmdvfs_dbg_data *mmdvfs_debug_data;
++
++static struct mmdvfs_dbg_data *mmdvfs_get_dbg_data(void)
++{
++	return smp_load_acquire(&mmdvfs_debug_data);
++}
+ 
+ static ap_ccf ap_ccf_fp;
+ void mmdvfs_ap_ccf_enable_notifier_set_fp(ap_ccf fp)
+@@ -399,6 +403,7 @@
+ 
+ int mmdvfs_set_ccf_enable_mutex(bool lock)
+ {
++	struct mmdvfs_dbg_data *dbg_data = mmdvfs_get_dbg_data();
+ 	struct mmdvfs_drv_data *drv_data;
+ 
+ 	if (!dbg_data)  {
+@@ -421,6 +426,7 @@
+ 
+ int mmdvfs_set_vcp_cb_ready(bool enable)
+ {
++	struct mmdvfs_dbg_data *dbg_data = mmdvfs_get_dbg_data();
+ 	struct mmdvfs_drv_data *drv_data;
+ 
+ 	if (!dbg_data)  {
+@@ -440,6 +446,7 @@
+ 
+ int mmdvfs_ap_ccf_enable(bool enable)
+ {
++	struct mmdvfs_dbg_data *dbg_data = mmdvfs_get_dbg_data();
+ 	struct mmdvfs_drv_data *drv_data;
+ 
+ 	if (!dbg_data)  {
+@@ -486,6 +493,7 @@
+  */
+ void mmdvfs_set_lp_mode(bool lp_mode)
+ {
++	struct mmdvfs_dbg_data *dbg_data = mmdvfs_get_dbg_data();
+ 	struct mmdvfs_drv_data *drv_data;
+ 	struct mmdvfs_mux_data *mux;
+ 	int i;
+@@ -539,6 +547,7 @@
+ 
+ int mmdvfs_dbg_clk_set(int step, bool is_force)
+ {
++	struct mmdvfs_dbg_data *dbg_data = mmdvfs_get_dbg_data();
+ 	struct mmdvfs_drv_data *drv_data;
+ 	s32 ret = 0;
+ 	u32 v_real = 0;
+@@ -591,8 +600,8 @@
+ 				|| (last_force_step >= 0 && step < last_force_step)) {
+ 				regulator_set_voltage(
+ 					dbg_data->reg, volt, INT_MAX);
+-				if (!IS_ERR(vcore_reg_id)) {
+-					v_real = regulator_get_voltage(vcore_reg_id);
++				if (!IS_ERR_OR_NULL(dbg_data->vcore_reg)) {
++					v_real = regulator_get_voltage(dbg_data->vcore_reg);
+ 					pr_notice("%s: step=%d volt=%d r_volt=%d is_force=%d\n",
+ 							__func__, step, volt, v_real, is_force);
+ 				}
+@@ -601,8 +610,8 @@
+ 				set_all_clk(drv_data, volt, false, true);
+ 				regulator_set_voltage(
+ 					dbg_data->reg, volt, INT_MAX);
+-				if (!IS_ERR(vcore_reg_id)) {
+-					v_real = regulator_get_voltage(vcore_reg_id);
++				if (!IS_ERR_OR_NULL(dbg_data->vcore_reg)) {
++					v_real = regulator_get_voltage(dbg_data->vcore_reg);
+ 					pr_notice("%s: step=%d volt=%d r_volt=%d is_force=%d\n",
+ 							__func__, step, volt, v_real, is_force);
+ 				}
+@@ -671,14 +680,16 @@
+ MODULE_PARM_DESC(log_level, "mmdvfs log level");
+ 
+ #define MAX_DUMP (PAGE_SIZE - 1)
+-struct mmdvfs_drv_data *drv_data;
+ int dump_setting(char *buf, const struct kernel_param *kp)
+ {
++	struct mmdvfs_dbg_data *dbg_data = mmdvfs_get_dbg_data();
++	struct mmdvfs_drv_data *drv_data;
+ 	u32 i, j;
+ 	int length = 0;
+ 
+-	if (!drv_data)
++	if (!dbg_data)
+ 		return 0;
++	drv_data = dbg_data->drv_data;
+ 
+ 	length += snprintf(buf + length, MAX_DUMP  - length,
+ 		"mux number:%d\n", drv_data->num_muxes);
+@@ -732,9 +743,16 @@
+ module_param_cb(dump_setting, &dump_param_ops, NULL, 0444);
+ MODULE_PARM_DESC(dump_setting, "dump mmdvfs current setting");
+ 
++static void mmdvfs_remove_opp_table(void *data)
++{
++	dev_pm_opp_of_remove_table(data);
++}
++
+ static int mmdvfs_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
++	struct mmdvfs_drv_data *drv_data;
++	struct mmdvfs_dbg_data *dbg_data;
+ 	struct regulator *reg;
+ 	u32 num_mux = 0, num_hopping = 0;
+ 	u32 num_clksrc, hopping_rate, num_hopping_rate;
+@@ -824,6 +842,9 @@
+ 	ret = dev_pm_opp_of_add_table(dev);
+ 	if (ret)
+ 		return ret;
++	ret = devm_add_action_or_reset(dev, mmdvfs_remove_opp_table, dev);
++	if (ret)
++		return ret;
+ 
+ 	freq = 0;
+ 	while (!IS_ERR(opp = dev_pm_opp_find_freq_ceil(dev, &freq))) {
+@@ -864,11 +885,10 @@
+ 		}
+ 	}
+ 
+-	vcore_reg_id = regulator_get(dev, "_vcore");
+-	if (IS_ERR(vcore_reg_id)) {
+-		pr_info("regulator_get vcore_reg_id failed: %ld\n",
+-				PTR_ERR(vcore_reg_id));
+-	}
++	dbg_data->vcore_reg = devm_regulator_get(dev, "_vcore");
++	if (IS_ERR(dbg_data->vcore_reg))
++		dev_info(dev, "get _vcore regulator failed: %ld\n",
++			 PTR_ERR(dbg_data->vcore_reg));
+ 
+ 	of_property_for_each_string(dev->of_node, "mediatek,mux-lp",
+ 				    lp_mux_prop, lp_clksrc_name) {
+@@ -887,9 +907,6 @@
+ 	mutex_init(&drv_data->lp_mutex);
+ 	mutex_init(&drv_data->ccf_enable_mutex);
+ 	drv_data->last_opp_level = MAX_OPP_NUM;
+-	mmdvfs_dbg = kzalloc(sizeof(*mmdvfs_dbg), GFP_KERNEL);
+-	if (!mmdvfs_dbg)
+-		return -ENOMEM;
+ 
+ 	mmdvfs_clk_node = of_parse_phandle(dev->of_node, "mediatek,mmdvfs-clk", 0);
+ 	if (!mmdvfs_clk_node)
+@@ -901,19 +918,35 @@
+ 	}
+ 	pr_notice("%s: ccf_ena_support:%d\n", __func__, drv_data->ccf_ena_support);
+ 
+-	mmdvfs_dbg->nb.notifier_call = mmdvfs_dbg_log_cb;
+-	mtk_smi_dbg_register_notifier(&mmdvfs_dbg->nb);
+-
+ 	drv_data->nb.notifier_call = regulator_event_notify;
+ 	ret = devm_regulator_register_notifier(reg, &drv_data->nb);
+-	if (ret)
+-		pr_notice("Failed to register notifier: %d\n", ret);
+-
+-	return ret;
++	if (ret) {
++		dev_notice(dev, "Failed to register notifier: %d\n", ret);
++		return ret;
++	}
++
++	mmdvfs_dbg.nb.notifier_call = mmdvfs_dbg_log_cb;
++	mtk_smi_dbg_register_notifier(&mmdvfs_dbg.nb);
++	platform_set_drvdata(pdev, dbg_data);
++	smp_store_release(&mmdvfs_debug_data, dbg_data);
++
++	return 0;
++}
++
++static void mmdvfs_remove(struct platform_device *pdev)
++{
++	struct mmdvfs_dbg_data *dbg_data = platform_get_drvdata(pdev);
++
++	WRITE_ONCE(mmdvfs_debug_data, NULL);
++	if (dbg_data->is_notifier_registered)
++		devm_regulator_unregister_notifier(dbg_data->reg, &dbg_data->drv_data->nb);
++	mtk_smi_dbg_unregister_notifier(&mmdvfs_dbg.nb);
+ }
+ 
+ void mtk_mmdvfs_aov_enable(const bool enable)
+ {
++	struct mmdvfs_dbg_data *dbg_data = mmdvfs_get_dbg_data();
++
+ 	if (!dbg_data)
+ 		return;
+ 	dbg_data->is_aov_enable = enable;
+@@ -922,6 +955,7 @@
+ 
+ static int mmdvfs_set_aov_clk(bool is_sys_resume)
+ {
++	struct mmdvfs_dbg_data *dbg_data = mmdvfs_get_dbg_data();
+ 	int err = 0, i;
+ 	struct clk *parent;
+ 
+@@ -1000,6 +1034,7 @@
+ 
+ static struct platform_driver mmdvfs_drv = {
+ 	.probe = mmdvfs_probe,
++	.remove = mmdvfs_remove,
+ 	.driver = {
+ 		.name = "mtk-mmdvfs",
+ 		.of_match_table = of_mmdvfs_match_tbl,
+diff --git a/kernel/kernel_device_modules-6.12/drivers/interconnect/mediatek/mmqos-hrt.c b/kernel/kernel_device_modules-6.12/drivers/interconnect/mediatek/mmqos-hrt.c
+--- a/kernel/kernel_device_modules-6.12/drivers/interconnect/mediatek/mmqos-hrt.c
++++ b/kernel/kernel_device_modules-6.12/drivers/interconnect/mediatek/mmqos-hrt.c
+@@ -383,13 +383,13 @@
+ {
+ 	if (!hrt)
+ 		return;
+-	mmqos_hrt = hrt;
+-	atomic_set(&mmqos_hrt->lock_count, 0);
+-	INIT_DELAYED_WORK(&mmqos_hrt->work, delay_work_handler);
+-	BLOCKING_INIT_NOTIFIER_HEAD(&mmqos_hrt->hrt_bw_throttle_notifier);
+-	mutex_init(&mmqos_hrt->blocking_lock);
+-	init_waitqueue_head(&mmqos_hrt->hrt_wait);
+-	mutex_init(&mmqos_hrt->hrt_rec.lock);
++	atomic_set(&hrt->lock_count, 0);
++	INIT_DELAYED_WORK(&hrt->work, delay_work_handler);
++	BLOCKING_INIT_NOTIFIER_HEAD(&hrt->hrt_bw_throttle_notifier);
++	mutex_init(&hrt->blocking_lock);
++	init_waitqueue_head(&hrt->hrt_wait);
++	mutex_init(&hrt->hrt_rec.lock);
++	smp_store_release(&mmqos_hrt, hrt);
+ }
+ EXPORT_SYMBOL_GPL(mtk_mmqos_init_hrt);
+ 
+diff --git a/kernel/kernel_device_modules-6.12/drivers/soc/mediatek/mtk-dvfsrc.c b/kernel/kernel_device_modules-6.12/drivers/soc/mediatek/mtk-dvfsrc.c
+--- a/kernel/kernel_device_modules-6.12/drivers/soc/mediatek/mtk-dvfsrc.c
++++ b/kernel/kernel_device_modules-6.12/drivers/soc/mediatek/mtk-dvfsrc.c
+@@ -1477,7 +1477,10 @@
+ {
+ 	int ret = 0;
+ 	struct arm_smccc_res ares;
+-	struct mtk_dvfsrc *dvfsrc = dev_get_drvdata(dev);
++	struct mtk_dvfsrc *dvfsrc = dev ? dev_get_drvdata(dev) : NULL;
++
++	if (!dvfsrc)
++		return;
+ 
+ 	switch (cmd) {
+ 	case MTK_DVFSRC_CMD_BW_REQUEST:
+@@ -1587,7 +1590,12 @@
+ 
+ int mtk_dvfsrc_query_info(const struct device *dev, u32 cmd, int *data)
+ {
+-	struct mtk_dvfsrc *dvfsrc = dev_get_drvdata(dev);
++	struct mtk_dvfsrc *dvfsrc = dev ? dev_get_drvdata(dev) : NULL;
++
++	if (!dvfsrc)
++		return -ENODEV;
++	if (!data)
++		return -EINVAL;
+ 
+ 	switch (cmd) {
+ 	case MTK_DVFSRC_CMD_VCORE_LEVEL_QUERY:
+@@ -1765,6 +1773,7 @@
+ unregister_regulator:
+ 	platform_device_unregister(dvfsrc->regulator);
+ err:
++	platform_set_drvdata(pdev, NULL);
+ 	return ret;
+ }
+ 
+@@ -2390,8 +2399,11 @@
+ {
+ 	struct mtk_dvfsrc *dvfsrc = platform_get_drvdata(pdev);
+ 
++	platform_device_unregister(dvfsrc->dvfsrc_start);
++	platform_device_unregister(dvfsrc->devfreq);
++	platform_device_unregister(dvfsrc->icc);
+ 	platform_device_unregister(dvfsrc->regulator);
+-	platform_device_unregister(dvfsrc->icc);
++	platform_set_drvdata(pdev, NULL);
+ }
+ 
+ static const struct of_device_id mtk_dvfsrc_of_match[] = {
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_drm_drv.c b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_drm_drv.c
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_drm_drv.c
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_drm_drv.c
+@@ -11758,6 +11758,7 @@
+ err_deinit:
+ 	mtk_drm_kms_deinit(drm);
+ err_free:
++	private->drm = NULL;
+ 	drm_dev_put(drm);
+ 	return ret;
+ }
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_disp_aal.c b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_disp_aal.c
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_disp_aal.c
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_disp_aal.c
+@@ -557,7 +557,7 @@
+ 		PQ_ERR("%s: led_conf is NULL!\n", __func__);
+ 		return -1;
+ 	}
+-	crtc = disp_pq_get_crtc_from_connector(led_conf->connector_id, g_drm_dev);
++	crtc = disp_pq_get_crtc_from_connector(led_conf->connector_id, smp_load_acquire(&g_drm_dev));
+ 	if (crtc == NULL) {
+ 		led_conf->aal_enable = 0;
+ 		PQ_ERR("%s: connector_id(%d) failed to get crtc!\n", __func__,
+@@ -3448,8 +3448,6 @@
+ 	struct drm_device *drm_dev = data;
+ 	int ret;
+ 
+-	if (!g_drm_dev)
+-		g_drm_dev = drm_dev;
+ 	ret = mtk_ddp_comp_register(drm_dev, &priv->ddp_comp);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to register component %s: %d\n",
+@@ -3457,6 +3455,8 @@
+ 		return ret;
+ 	}
+ 
++	if (!READ_ONCE(g_drm_dev))
++		smp_store_release(&g_drm_dev, drm_dev);
+ 	return 0;
+ }
+ 
+@@ -3466,6 +3466,8 @@
+ 	struct mtk_disp_aal *priv = dev_get_drvdata(dev);
+ 	struct drm_device *drm_dev = data;
+ 
++	if (READ_ONCE(g_drm_dev) == drm_dev)
++		WRITE_ONCE(g_drm_dev, NULL);
+ 	mtk_ddp_comp_unregister(drm_dev, &priv->ddp_comp);
+ }
+ 
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_disp_ccorr.c b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_disp_ccorr.c
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_disp_ccorr.c
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_disp_ccorr.c
+@@ -571,7 +571,7 @@
+ 		PQ_ERR("%s: led_conf is NULL!\n", __func__);
+ 		return -1;
+ 	}
+-	crtc = disp_pq_get_crtc_from_connector(led_conf->connector_id, g_drm_dev);
++	crtc = disp_pq_get_crtc_from_connector(led_conf->connector_id, smp_load_acquire(&g_drm_dev));
+ 	if (crtc == NULL) {
+ 		led_conf->aal_enable = 0;
+ 		PQ_ERR("%s: failed to get crtc!\n", __func__);
+@@ -1345,8 +1345,6 @@
+ 	int ret;
+ 
+ 	DDPINFO("%s\n", __func__);
+-	if (!g_drm_dev)
+-		g_drm_dev = drm_dev;
+ 
+ 	ret = mtk_ddp_comp_register(drm_dev, &priv->ddp_comp);
+ 	if (ret < 0) {
+@@ -1356,6 +1354,8 @@
+ 	}
+ 
+ 	disp_ccorr_update_dispsys_helper(&priv->ddp_comp, drm_dev);
++	if (!READ_ONCE(g_drm_dev))
++		smp_store_release(&g_drm_dev, drm_dev);
+ 	return 0;
+ }
+ 
+@@ -1365,6 +1365,8 @@
+ 	struct mtk_disp_ccorr *priv = dev_get_drvdata(dev);
+ 	struct drm_device *drm_dev = data;
+ 
++	if (READ_ONCE(g_drm_dev) == drm_dev)
++		WRITE_ONCE(g_drm_dev, NULL);
+ 	mtk_ddp_comp_unregister(drm_dev, &priv->ddp_comp);
+ }
+ 
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.c b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.c
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.c
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.c
+@@ -563,7 +563,7 @@
+ extern bool oplus_apollo_unsupported(void);
+ #endif
+ 
+-static struct drm_device *drm_dev;
++static struct drm_device *dsi_drm_dev;
+ static enum dsi_cmd_verion dsi_cmd_ver;
+ 
+ struct mtk_panel_ext *mtk_dsi_get_panel_ext(struct mtk_ddp_comp *comp);
+@@ -4294,6 +4294,7 @@
+ 
+ int mtk_dsi_fifo_mon_trigger_start_set(bool is_trig_start)
+ {
++	struct drm_device *drm_dev = smp_load_acquire(&dsi_drm_dev);
+ 	struct drm_crtc *crtc;
+ 	int ret = 0;
+ 	unsigned int *addr = NULL;
+@@ -4306,7 +4307,7 @@
+ 	}
+ 
+ 	/* this debug cmd only for crtc0 */
+-	crtc = list_first_entry(&(drm_dev)->mode_config.crtc_list,
++	crtc = list_first_entry_or_null(&drm_dev->mode_config.crtc_list,
+ 				typeof(*crtc), head);
+ 	if (IS_ERR_OR_NULL(crtc)) {
+ 		DDPINFO("%s failed to find crtc\n", __func__);
+@@ -4327,6 +4328,7 @@
+ 
+ int mtk_hrt_issue_flag_set(bool is_hrt_issue)
+ {
++	struct drm_device *drm_dev = smp_load_acquire(&dsi_drm_dev);
+ 	struct drm_crtc *crtc;
+ 	int ret = 0;
+ 	unsigned int *addr = NULL;
+@@ -4339,7 +4341,7 @@
+ 	}
+ 
+ 	/* this debug cmd only for crtc0 */
+-	crtc = list_first_entry(&(drm_dev)->mode_config.crtc_list,
++	crtc = list_first_entry_or_null(&drm_dev->mode_config.crtc_list,
+ 				typeof(*crtc), head);
+ 	if (IS_ERR_OR_NULL(crtc)) {
+ 		DDPINFO("%s failed to find crtc\n", __func__);
+@@ -4389,6 +4391,7 @@
+ 
+ static void hrt_issue_timer_callback(struct timer_list *timer)
+ {
++	struct drm_device *drm_dev = smp_load_acquire(&dsi_drm_dev);
+ 	struct drm_crtc *crtc;
+ 	int ret = 0;
+ 	unsigned int *addr = NULL;
+@@ -4401,7 +4404,7 @@
+ 	}
+ 
+ 	/* this debug cmd only for crtc0 */
+-	crtc = list_first_entry(&(drm_dev)->mode_config.crtc_list,
++	crtc = list_first_entry_or_null(&drm_dev->mode_config.crtc_list,
+ 				typeof(*crtc), head);
+ 	if (IS_ERR_OR_NULL(crtc)) {
+ 		DDPINFO("%s failed to find crtc\n", __func__);
+@@ -12551,6 +12554,7 @@
+ 
+ int mtk_mipi_dsi_cmd(void *dsi, void *handle, struct mtk_dsi_cmd_option *cmd_opt, const struct mtk_dsi_cmd_msg *cmd_msg)
+ {
++	struct drm_device *drm_dev = smp_load_acquire(&dsi_drm_dev);
+ 	struct mtk_dsi *mtk_dsi;
+ 	struct mtk_drm_private *private;
+ 	struct mtk_ddp_comp *output_comp;
+@@ -17119,7 +17123,7 @@
+ 	if ((mtk_dsi_cmd_version() == DSI_CMD_V2) && dsi->driver_data->support_rd_cmdq)
+ 		mtk_dsi_mask(dsi, DSI_RX_CON(dsi->driver_data), RX_DATA_SRAM_MODE, RX_DATA_SRAM_MODE);
+ 
+-	drm_dev = drm;
++	smp_store_release(&dsi_drm_dev, drm);
+ 	DDPMSG("%s-, dsi_cmd_ver=%d\n", __func__, dsi_cmd_ver);
+ 	return 0;
+ 
+@@ -17138,6 +17142,8 @@
+ 	if (dsi->is_slave)
+ 		return;
+ 
++	if (READ_ONCE(dsi_drm_dev) == drm)
++		WRITE_ONCE(dsi_drm_dev, NULL);
+ 	mtk_dsi_destroy_conn_enc(dsi);
+ 	mipi_dsi_host_unregister(&dsi->host);
+ 	mtk_ddp_comp_unregister(drm, &dsi->ddp_comp);

@@ -1,0 +1,324 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_core.c b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_core.c
+--- a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_core.c
++++ b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_core.c
+@@ -365,20 +365,32 @@
+ }
+ EXPORT_SYMBOL(tcpc_dev_get_by_name);
+ 
+-static void tcpc_device_release(struct device *dev)
+-{
+-	struct tcpc_device *tcpc = to_tcpc_device(dev);
+-
+-	pr_info("%s : %s device release\n", __func__, dev_name(dev));
+-	PD_WARN_ON(tcpc == NULL);
+-	/* Un-init pe thread */
+-#if IS_ENABLED(CONFIG_USB_POWER_DELIVERY)
++static void tcpc_device_stop(struct tcpc_device *tcpc)
++{
++	disable_delayed_work_sync(&tcpc->event_init_work);
++#if IS_ENABLED(CONFIG_USB_POWER_DELIVERY)
++#if CONFIG_USB_PD_REV30
++	if (tcpc->bat_psy) {
++		power_supply_unreg_notifier(&tcpc->bat_nb);
++		disable_delayed_work_sync(&tcpc->bat_update_work);
++		power_supply_put(tcpc->bat_psy);
++	}
++#endif /* CONFIG_USB_PD_REV30 */
++	disable_delayed_work_sync(&tcpc->tx_pending_work);
+ 	tcpci_event_deinit(tcpc);
+ #endif /* CONFIG_USB_POWER_DELIVERY */
+-	/* Un-init timer thread */
+ 	tcpci_timer_deinit(tcpc);
+-	/* Un-init Mutex */
+-	/* Do initialization */
++	destroy_workqueue(tcpc->evt_wq);
++}
++
++static void tcpc_device_release(struct device *dev)
++{
++	struct tcpc_device *tcpc = to_tcpc_device(dev);
++	int i;
++
++	for (i = 0; i < TCP_NOTIFY_IDX_NR; i++)
++		srcu_cleanup_notifier_head(&tcpc->evt_nh[i]);
++	kfree(tcpc);
+ }
+ 
+ static void tcpc_event_init_work(struct work_struct *work);
+@@ -390,13 +402,15 @@
+ 	int ret = 0, i = 0;
+ 
+ 	pr_info("%s register tcpc device (%s)\n", __func__, tcpc_desc->name);
+-	tcpc = devm_kzalloc(parent, sizeof(*tcpc), GFP_KERNEL);
+-	if (!tcpc) {
+-		pr_err("%s : allocate tcpc memory failed\n", __func__);
+-		return NULL;
+-	}
++	tcpc = kzalloc(sizeof(*tcpc), GFP_KERNEL);
++	if (!tcpc)
++		return ERR_PTR(-ENOMEM);
+ 
+ 	tcpc->evt_wq = alloc_ordered_workqueue("%s", 0, tcpc_desc->name);
++	if (!tcpc->evt_wq) {
++		kfree(tcpc);
++		return ERR_PTR(-ENOMEM);
++	}
+ 	for (i = 0; i < TCP_NOTIFY_IDX_NR; i++)
+ 		srcu_init_notifier_head(&tcpc->evt_nh[i]);
+ 
+@@ -413,7 +427,6 @@
+ 	tcpc->dev.release = tcpc_device_release;
+ 	dev_set_drvdata(&tcpc->dev, tcpc);
+ 	tcpc->drv_data = drv_data;
+-	dev_set_name(&tcpc->dev, "%s", tcpc_desc->name);
+ 	tcpc->desc = *tcpc_desc;
+ 	tcpc->ops = ops;
+ 	tcpc->typec_local_rp_level = tcpc_desc->rp_lvl;
+@@ -424,65 +437,82 @@
+ 	tcpc->tcpc_vconn_supply = tcpc_desc->vconn_supply;
+ 	ratelimit_state_init(&tcpc->alert_rs, HZ, 500);
+ 
++	device_initialize(&tcpc->dev);
+ 	device_set_of_node_from_dev(&tcpc->dev, parent);
+-
+-	ret = device_register(&tcpc->dev);
+-	if (ret) {
+-		kfree(tcpc);
+-		return ERR_PTR(ret);
+-	}
+-	device_init_wakeup(&tcpc->dev, true);
+-
+-	tcpci_timer_init(tcpc);
+ 	INIT_DELAYED_WORK(&tcpc->event_init_work, tcpc_event_init_work);
+ #if IS_ENABLED(CONFIG_USB_POWER_DELIVERY)
+-	tcpci_event_init(tcpc);
+ 	init_waitqueue_head(&tcpc->tx_wait_que);
+ 	atomic_set(&tcpc->tx_pending, 0);
+ 	mutex_init(&tcpc->rxbuf_lock);
+ 	INIT_DELAYED_WORK(&tcpc->tx_pending_work, tcpc_tx_pending_work_func);
+-	pd_core_init(tcpc);
+ #endif /* CONFIG_USB_POWER_DELIVERY */
+ 
++	ret = dev_set_name(&tcpc->dev, "%s", tcpc_desc->name);
++	if (ret)
++		goto err_put_device;
++
++	ret = tcpci_timer_init(tcpc);
++	if (ret)
++		goto err_put_device;
++
++#if IS_ENABLED(CONFIG_USB_POWER_DELIVERY)
++	ret = pd_core_init(tcpc);
++	if (ret)
++		goto err_put_device;
++
++	ret = tcpci_event_init(tcpc);
++	if (ret)
++		goto err_put_device;
++#endif /* CONFIG_USB_POWER_DELIVERY */
++
++	ret = device_add(&tcpc->dev);
++	if (ret)
++		goto err_put_device;
++	device_init_wakeup(&tcpc->dev, true);
++
+ 	return tcpc;
++
++err_put_device:
++	tcpc_device_stop(tcpc);
++	put_device(&tcpc->dev);
++	return ERR_PTR(ret);
+ }
+ EXPORT_SYMBOL(tcpc_device_register);
+ 
+ int tcpc_device_irq_enable(struct tcpc_device *tcpc)
+ {
+-	int ret;
+-
++	int ret = 0;
++
++	tcpci_lock_typec(tcpc);
+ 	if (tcpc->user_complete) {
+ 		dev_info(&tcpc->dev, "%s: already done\n", __func__);
+-		return 0;
+-	}
+-	tcpc->user_complete = true;
++		goto unlock;
++	}
+ 
+ 	if (!tcpc->ops->init) {
+-		pr_notice("%s Please implment tcpc ops init function\n",
+-		__func__);
+-		return -EINVAL;
+-	}
+-
+-	tcpci_lock_typec(tcpc);
++		pr_notice("%s: missing tcpc ops init\n", __func__);
++		ret = -EINVAL;
++		goto unlock;
++	}
++
+ 	ret = tcpci_init(tcpc, false);
+ 	if (ret < 0) {
+-		tcpci_unlock_typec(tcpc);
+-		pr_err("%s tcpc init fail\n", __func__);
+-		return ret;
++		pr_err("%s: tcpc init failed\n", __func__);
++		goto unlock;
+ 	}
+ 
+ 	ret = tcpc_typec_init(tcpc, tcpc->desc.role_def);
++	if (ret < 0) {
++		pr_err("%s: tcpc typec init failed\n", __func__);
++		goto unlock;
++	}
++
++	tcpc->user_complete = true;
++	schedule_delayed_work(&tcpc->event_init_work, 0);
++	pr_info("%s : tcpc irq enable OK!\n", __func__);
++unlock:
+ 	tcpci_unlock_typec(tcpc);
+-	if (ret < 0) {
+-		pr_err("%s : tcpc typec init fail\n", __func__);
+-		return ret;
+-	}
+-
+-	schedule_delayed_work(&tcpc->event_init_work, 0);
+-
+-	pr_info("%s : tcpc irq enable OK!\n", __func__);
+-	return 0;
++	return ret;
+ }
+ EXPORT_SYMBOL(tcpc_device_irq_enable);
+ 
+@@ -841,6 +871,7 @@
+ 	if (!tcpc)
+ 		return;
+ 
++	tcpc_device_stop(tcpc);
+ 	tcpc_typec_deinit(tcpc);
+ 	device_unregister(&tcpc->dev);
+ 
+diff --git a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_timer.c b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_timer.c
+--- a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_timer.c
++++ b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_timer.c
+@@ -502,8 +502,6 @@
+ 
+ 	init_waitqueue_head(&tcpc->timer_wait_que);
+ 	tcpc->timer_tick = 0;
+-	tcpc->timer_task = kthread_run(tcpc_timer_thread_fn, tcpc,
+-				       "tcpc_timer_%s", tcpc->desc.name);
+ 	for (i = 0; i < PD_TIMER_NR; i++) {
+ 		alarm_init(&tcpc->tcpc_timer[i].alarm,
+ 			   ALARM_REALTIME, tcpc_timer_call);
+@@ -511,12 +509,20 @@
+ 		tcpc->tcpc_timer[i].en = false;
+ 	}
+ 
++	tcpc->timer_task = kthread_run(tcpc_timer_thread_fn, tcpc,
++				       "tcpc_timer_%s", tcpc->desc.name);
++	if (IS_ERR(tcpc->timer_task))
++		return PTR_ERR(tcpc->timer_task);
++
+ 	pr_info("%s : init OK\n", __func__);
+ 	return 0;
+ }
+ 
+ int tcpci_timer_deinit(struct tcpc_device *tcpc)
+ {
++	if (IS_ERR_OR_NULL(tcpc->timer_task))
++		return 0;
++
+ 	kthread_stop(tcpc->timer_task);
+ 	mutex_lock(&tcpc->timer_lock);
+ 	tcpc_reset_timer_range(tcpc, 0, PD_TIMER_NR);
+diff --git a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_event.c b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_event.c
+--- a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_event.c
++++ b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpci_event.c
+@@ -1236,13 +1236,13 @@
+ 	tcpc->event_task = kthread_run(tcpc_event_thread_fn, tcpc,
+ 				       "tcpc_event_%s", tcpc->desc.name);
+ 
++	return PTR_ERR_OR_ZERO(tcpc->event_task);
++}
++
++int tcpci_event_deinit(struct tcpc_device *tcpc)
++{
++	if (!IS_ERR_OR_NULL(tcpc->event_task))
++		kthread_stop(tcpc->event_task);
++
+ 	return 0;
+ }
+-
+-int tcpci_event_deinit(struct tcpc_device *tcpc)
+-{
+-	if (tcpc->event_task != NULL)
+-		kthread_stop(tcpc->event_task);
+-
+-	return 0;
+-}
+diff --git a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c
+--- a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c
++++ b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c
+@@ -2319,8 +2319,8 @@
+ 	struct tcpc_device *tcpc = NULL;
+ 
+ 	tcpc = tcpc_device_register(ddata->dev, desc, &mt6375_tcpc_ops, ddata);
+-	if (IS_ERR_OR_NULL(tcpc))
+-		return -EINVAL;
++	if (IS_ERR(tcpc))
++		return PTR_ERR(tcpc);
+ 	ddata->tcpc = tcpc;
+ 
+ #if CONFIG_USB_PD_DISABLE_PE
+@@ -2515,7 +2515,6 @@
+ 	if (!ddata)
+ 		return -ENOMEM;
+ 	ddata->dev = &pdev->dev;
+-	platform_set_drvdata(pdev, ddata);
+ 
+ 	ddata->rmap = dev_get_regmap(ddata->dev->parent, NULL);
+ 	if (!ddata->rmap) {
+@@ -2550,22 +2549,22 @@
+ 		return ret;
+ 	}
+ 
++	ret = mt6375_check_revision(ddata);
++	if (ret < 0) {
++		dev_notice(ddata->dev, "failed to check revision(%d)\n", ret);
++		return ret;
++	}
++
++	ret = mt6375_sw_reset(ddata);
++	if (ret < 0) {
++		dev_err(ddata->dev, "failed to reset sw(%d)\n", ret);
++		return ret;
++	}
++
+ 	ret = mt6375_register_tcpcdev(ddata);
+ 	if (ret < 0) {
+ 		dev_err(ddata->dev, "failed to register tcpcdev(%d)\n", ret);
+ 		return ret;
+-	}
+-
+-	ret = mt6375_check_revision(ddata);
+-	if (ret < 0) {
+-		dev_notice(ddata->dev, "failed to check revision(%d)\n", ret);
+-		goto err;
+-	}
+-
+-	ret = mt6375_sw_reset(ddata);
+-	if (ret < 0) {
+-		dev_err(ddata->dev, "failed to reset sw(%d)\n", ret);
+-		goto err;
+ 	}
+ 
+ 	if (ddata->desc->en_fod) {
+@@ -2615,6 +2614,7 @@
+ #ifdef OPLUS_FEATURE_CHG_BASIC
+ 	device_init_wakeup(ddata->dev, true);
+ #endif
++	platform_set_drvdata(pdev, ddata);
+ 	dev_info(ddata->dev, "%s successfully!\n", __func__);
+ 	return 0;
+ err:
