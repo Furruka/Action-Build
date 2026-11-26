@@ -121,6 +121,7 @@ jobs:
           supplier_headers="$GITHUB_WORKSPACE/ci-patches/0011-qqcandy-drm-supplier-headers.patch"
           dsi_drm="$GITHUB_WORKSPACE/ci-patches/0012-qqcandy-drm-dsi-no-tee.patch"
           dvfsrc_headers="$GITHUB_WORKSPACE/ci-patches/0013-qqcandy-dvfsrc-ddk-headers.patch"
+          dsi_conditional="$GITHUB_WORKSPACE/ci-patches/0014-qqcandy-dsi-ddk-conditional-source.patch"
           fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
           printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
           git -C "$core" rev-parse HEAD
@@ -128,7 +129,7 @@ jobs:
           test "$(realpath -e "$(git -C "$core" rev-parse --show-toplevel)")" = "$core"
           sha256sum "$patch" "$fdt_fix" "$init_fix" "$usb_headers" "$pinctrl_headers" \
             "$tianma_panel" "$drm_headers" "$drm_providers" "$typec_order" "$usb_probe" "$supplier_headers" \
-            "$dsi_drm" "$dvfsrc_headers" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
+            "$dsi_drm" "$dvfsrc_headers" "$dsi_conditional" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
           git -C "$core" apply --check --verbose "$patch"
           git -C "$core" apply --verbose "$patch"
           git -C "$core" apply --check --verbose "$fdt_fix"
@@ -156,6 +157,8 @@ jobs:
           git -C "$modules_repo" apply --verbose "$dsi_drm"
           git -C "$modules_repo" apply --check --verbose "$dvfsrc_headers"
           git -C "$modules_repo" apply --verbose "$dvfsrc_headers"
+          git -C "$modules_repo" apply --check --verbose "$dsi_conditional"
+          git -C "$modules_repo" apply --verbose "$dsi_conditional"
           git -C "$core" status --short
           grep -F 'static struct mfdt_ctx ctx __initdata' "$core/arch/arm64/kernel/mtk_embed_merge.c"
           grep -Fx 'config MTK_EMBED_BOARD_DTB' "$core/arch/arm64/Kconfig"
