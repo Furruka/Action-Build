@@ -1,0 +1,163 @@
+diff --git a/vendor/oplus/kernel/boot/oplus_projectinfo/mtk/oplus_project.c b/vendor/oplus/kernel/boot/oplus_projectinfo/mtk/oplus_project.c
+--- a/vendor/oplus/kernel/boot/oplus_projectinfo/mtk/oplus_project.c
++++ b/vendor/oplus/kernel/boot/oplus_projectinfo/mtk/oplus_project.c
+@@ -56,7 +56,7 @@
+ 	char feature_node[64] = {0};
+ 	struct device_node *np = NULL;
+ 	unsigned char tmp_feature[4] = {};
+-        u32 minfo;
++	u32 minfo;
+ 
+ 	if (g_project) {
+ 		return;
+@@ -70,7 +70,7 @@
+ 
+ 		if (ret) {
+ 			pr_err("init_project_version_newcdt nVersion fail");
+-			return;
++			goto put_node;
+ 		}
+ 
+ 		ret = of_property_read_u32(np, "nProject",
+@@ -78,14 +78,14 @@
+ 
+ 		if (ret) {
+ 			pr_err("init_project_version_newcdt nProject fail");
+-			return;
++			goto put_node;
+ 		}
+ 
+ 		ret = of_property_read_u32(np, "nPrj", &oplus_prj);
+ 
+ 		if (ret) {
+ 			pr_err("init_project_version_newcdt nProject fail");
+-			return;
++			goto put_node;
+ 		}
+ 
+ 		ret = of_property_read_u32(np, "nDtsi",
+@@ -93,7 +93,7 @@
+ 
+ 		if (ret) {
+ 			pr_err("init_project_version_newcdt nDtsi fail");
+-			return;
++			goto put_node;
+ 		}
+ 
+ 		ret = of_property_read_u32(np, "nAudio",
+@@ -101,7 +101,7 @@
+ 
+ 		if (ret) {
+ 			pr_err("init_project_version_newcdt nAudio fail");
+-			return;
++			goto put_node;
+ 		}
+ 
+ 		ret = of_property_read_u32(np, "nRF", &(local_ProjectInfoCDT.nDataSCDT.RF));
+@@ -113,7 +113,7 @@
+ 		for (i = 0; i < FEATURE_COUNT; i++) {
+ 			sprintf(feature_node, "nFeature%d", i);
+ 			ret = of_property_read_u8_array(np, feature_node, tmp_feature, 4);
+-			local_ProjectInfoCDT.nDataBCDT.Feature[i] = tmp_feature[3];
++			local_ProjectInfoCDT.nDataBCDT.Feature[i] = ret ? 0 : tmp_feature[3];
+ 
+ 			if (ret) {
+ 				pr_err("init_project_version_newcdt nFeature[%d]: %s %u fail",
+@@ -125,7 +125,7 @@
+ 
+ 		if (ret) {
+ 			pr_err("init_project_version_newcdt nPCB fail");
+-			return;
++			goto put_node;
+ 		}
+ 
+ 		/*for eng version*/
+@@ -134,7 +134,7 @@
+ 
+ 		if (ret) {
+ 			pr_err("init_project_version_newcdt eng_version fail");
+-			return;
++			goto put_node;
+ 		}
+ 
+ 		ret = of_property_read_u32(np, "is_confidential",
+@@ -142,7 +142,7 @@
+ 
+ 		if (ret) {
+ 			pr_err("init_project_version_newcdt is_confidential fail");
+-			return;
++			goto put_node;
+ 		}
+ 
+ 		ret = of_property_read_u32(np, "nMidPlatVer",
+@@ -150,13 +150,15 @@
+ 		if (ret) {
+ 			pr_err("init_project_version_newcdt nMidPlatVer fail");
+ 		    local_ProjectInfoCDT.nDataMidPlat.nVersion = MIDPLAT_INFO_UNSUPPORTED;
+-			return;
++			goto put_node;
+ 		}
+ 		pr_err("init_project_version_newcdt MidPlatVersion = %d", local_ProjectInfoCDT.nDataMidPlat.nVersion);
+ 
+ 		for (i = 0; i < OPLUS_FEAUTRE_MAX; i++) {
+ 			sprintf(feature_node, "MidPlatInfo%d", i);
+ 			ret = of_property_read_u32(np, feature_node, &minfo);
++			if (ret)
++				minfo = 0;
+ 			local_ProjectInfoCDT.nDataMidPlat.infoMidPlat[i] = minfo;
+ 			pr_err("init_project_version_newcdt infoMidPlat[%d] = %d", i, minfo);
+ 
+@@ -214,6 +216,9 @@
+ 			g_project->nDataSCDT.PmicOcp[5]);
+ 		pr_err("oplus project info loading finished\n");
+ 	}
++
++put_node:
++	of_node_put(np);
+ }
+ 
+ static bool cdt_integrity = false;
+@@ -257,6 +262,7 @@
+ 	int ret = -1;
+ 	np = of_find_node_by_name(NULL, "oplus_project");
+ 	ret = of_property_read_u32(np, "newcdt", &newcdt);
++	of_node_put(np);
+ 
+ 	if (ret) {
+ 		pr_err("read newcdt fail\n");
+@@ -403,15 +409,14 @@
+ 
+ int get_midplat_feature_info(OPLUS_MID_PLAT_FEATURE_T feature)
+ {
+-	if (feature < 0 || feature > OPLUS_FEAUTRE_MAX) {
++	if (feature < 0 || feature >= OPLUS_FEAUTRE_MAX) {
+ 		pr_err("%s:invalid param\n", __func__);
+ 		return -1;
+ 	}
+ 
+ 	init_project_version();
+-	if (g_project->nDataMidPlat.nVersion == MIDPLAT_INFO_NORMAL) {
+-		return g_project ? g_project->nDataMidPlat.infoMidPlat[feature] : -EINVAL;
+-	}
++	if (g_project && g_project->nDataMidPlat.nVersion == MIDPLAT_INFO_NORMAL)
++		return g_project->nDataMidPlat.infoMidPlat[feature];
+ 	return -1;
+ }
+ EXPORT_SYMBOL(get_midplat_feature_info);
+@@ -489,9 +494,13 @@
+ 
+ static void dump_oplus_feature(struct seq_file *s)
+ {
+-	int i = 0;
+-
+-	for(i = 0;i < FEATURE_COUNT; i++) {
++	int i;
++
++	init_project_version();
++	if (!g_project)
++		return;
++
++	for (i = 0; i < FEATURE_COUNT; i++) {
+ 		seq_printf(s, "%u\t", g_project->nDataBCDT.Feature[i]);
+ 	}
+ 	seq_printf(s, "\n");
