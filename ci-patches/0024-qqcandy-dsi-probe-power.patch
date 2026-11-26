@@ -1,0 +1,135 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.c b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.c
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.c
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.c
+@@ -3749,6 +3749,18 @@
+ 	writel(0, dsi->regs + DSI_INTSTA);
+ }
+ 
++static void mtk_dsi_enable_probe_irq(struct mtk_dsi *dsi)
++{
++	int irq = xchg(&dsi->deferred_probe_irq, 0);
++
++	if (irq <= 0)
++		return;
++
++	writel(0, dsi->regs + DSI_INTEN);
++	writel(0, dsi->regs + DSI_INTSTA);
++	enable_irq(irq);
++}
++
+ static void mtk_dsi_set_interrupt_enable(struct mtk_dsi *dsi)
+ {
+ 	u32 inten;
+@@ -3795,6 +3807,7 @@
+ 			inten |= TARGET_LINE_INT_FLAG;
+ 	}
+ 
++	mtk_dsi_enable_probe_irq(dsi);
+ 	writel(0, dsi->regs + DSI_INTSTA);
+ 	writel(inten, dsi->regs + DSI_INTEN);
+ }
+@@ -8486,11 +8499,13 @@
+ 	if (atomic_read(&dsi->ulps_async) != 0)
+ 		DDPINFO("%s: ulps exit not finished yet\n", __func__);
+ 
+-	mtk_dsi_poweron(dsi);
++	if (!mtk_dsi_poweron(dsi))
++		mtk_dsi_enable_probe_irq(dsi);
+ 
+ 	if (dsi->slave_dsi) {
+ 		dsi->slave_dsi->ddp_comp.mtk_crtc = dsi->ddp_comp.mtk_crtc;
+-		mtk_dsi_poweron(dsi->slave_dsi);
++		if (!mtk_dsi_poweron(dsi->slave_dsi))
++			mtk_dsi_enable_probe_irq(dsi->slave_dsi);
+ 	}
+ }
+ 
+@@ -17746,6 +17761,8 @@
+ 	int ret;
+ 	unsigned int alias;
+ 	bool panel_lock = false;
++	bool defer_probe_mmio =
++		of_device_is_compatible(dev->of_node, "mediatek,mt6895-dsi");
+ 
+ 	DDPINFO("%s+\n", __func__);
+ 	dsi = devm_kzalloc(dev, sizeof(*dsi), GFP_KERNEL);
+@@ -17859,17 +17876,19 @@
+ 			goto error;
+ 	}
+ 
+-	dev_info(dev, "DSI_STATE_DGB6-9[0x%x 0x%x 0x%x 0x%x]\n",
+-		readl(dsi->regs + DSI_STATE_DBG6(dsi->driver_data)),
+-		readl(dsi->regs + DSI_STATE_DBG7(dsi->driver_data)),
+-		readl(dsi->regs + DSI_STATE_DBG8(dsi->driver_data)),
+-		readl(dsi->regs + DSI_STATE_DBG9(dsi->driver_data)));
+-
+-	dev_info(dev, "DSI DEBUG log [0x%x 0x%x 0x%x 0x%x]\n",
+-		readl(dsi->regs + DSI_INTSTA),
+-		readl(dsi->regs + DSI_INTEN),
+-		readl(dsi->regs + DSI_MODE_CTRL(dsi->driver_data)),
+-		readl(dsi->regs + dsi->driver_data->reg_cmdq0_ofs));
++	if (!defer_probe_mmio) {
++		dev_info(dev, "DSI_STATE_DGB6-9[0x%x 0x%x 0x%x 0x%x]\n",
++			readl(dsi->regs + DSI_STATE_DBG6(dsi->driver_data)),
++			readl(dsi->regs + DSI_STATE_DBG7(dsi->driver_data)),
++			readl(dsi->regs + DSI_STATE_DBG8(dsi->driver_data)),
++			readl(dsi->regs + DSI_STATE_DBG9(dsi->driver_data)));
++
++		dev_info(dev, "DSI DEBUG log [0x%x 0x%x 0x%x 0x%x]\n",
++			readl(dsi->regs + DSI_INTSTA),
++			readl(dsi->regs + DSI_INTEN),
++			readl(dsi->regs + DSI_MODE_CTRL(dsi->driver_data)),
++			readl(dsi->regs + dsi->driver_data->reg_cmdq0_ofs));
++	}
+ 
+ 	dsi->phy = devm_phy_get(dev, "dphy");
+ 	if (IS_ERR(dsi->phy)) {
+@@ -17900,8 +17919,16 @@
+ 
+ 	/* init wq */
+ 	init_dsi_wq(dsi);
+-	writel(0, dsi->regs + DSI_INTSTA);
+-	writel(0, dsi->regs + DSI_INTEN);
++
++	/*
++	 * MT6895 DSI has a dedicated IRQ and no local DT power domain.
++	 * Leave controller registers and the IRQ alone until DDP powers
++	 * the display path, even if LK did not leave that path active.
++	 */
++	if (!defer_probe_mmio) {
++		writel(0, dsi->regs + DSI_INTSTA);
++		writel(0, dsi->regs + DSI_INTEN);
++	}
+ 
+ 	num_irqs = platform_irq_count(pdev);
+ 
+@@ -17918,7 +17945,8 @@
+ 		irq_set_status_flags(irq, IRQ_TYPE_LEVEL_HIGH);
+ 		ret = devm_request_irq(
+ 			&pdev->dev, irq, dsi->driver_data->irq_handler,
+-			IRQF_TRIGGER_NONE | IRQF_SHARED, dev_name(&pdev->dev), dsi);
++			IRQF_TRIGGER_NONE | (defer_probe_mmio ? IRQF_NO_AUTOEN : IRQF_SHARED),
++			dev_name(&pdev->dev), dsi);
+ 		if (ret) {
+ 			DDPAEE("%s:%d, failed to request irq:%d ret:%d\n",
+ 					__func__, __LINE__,
+@@ -17926,6 +17954,8 @@
+ 			ret = -EPROBE_DEFER;
+ 			goto error;
+ 		}
++		if (defer_probe_mmio)
++			dsi->deferred_probe_irq = irq;
+ 	}
+ 
+ #ifdef OPLUS_FEATURE_DISPLAY_ADFR
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.h b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.h
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.h
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/mtk_dsi.h
+@@ -124,6 +124,7 @@
+ };
+ 
+ struct mtk_dsi {
++	int deferred_probe_irq;
+ 	struct mtk_ddp_comp ddp_comp;
+ 	struct device *dev;
+ 	struct mipi_dsi_host host;

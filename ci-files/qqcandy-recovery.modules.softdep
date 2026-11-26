@@ -20,4 +20,4 @@ softdep mtk_dvfsrc_regulator pre: mtk_dvfsrc
 softdep mmqos_mt6895 pre: mtk_emi
 softdep mtk_scpsys_mt6895 pre: clk_mt6895 clk_mt6895_mmsys clk_mt6895_mdpsys clk_mt6895_img clk_mt6895_vcodec clk_mt6895_cam clk_mt6895_ccu mt6315_regulator
 softdep oplus21143_tianma_nt36672c_dsi_vdo pre: mt6363_regulator i2c_mt65xx
-softdep mediatek_drm pre: mtk_dvfsrc_regulator oplus21143_tianma_nt36672c_dsi_vdo
+softdep mediatek_drm pre: mtk_scpsys_mt6895 mtk_dvfsrc_regulator mmqos_mt6895 pwm_mtk_disp oplus21143_tianma_nt36672c_dsi_vdo
