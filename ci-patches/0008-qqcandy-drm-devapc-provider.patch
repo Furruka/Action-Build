@@ -1,0 +1,38 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/BUILD.bazel b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/BUILD.bazel
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/BUILD.bazel
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mediatek_v2/BUILD.bazel
+@@ -256,7 +256,7 @@
+         "//kernel_device_modules-{}/drivers/misc/mediatek/mminfra:mtk-mminfra-debug".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/misc/mediatek/mm_monitor:mtk-mm-monitor-controller".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/gpu/drm/mediatek/mml:mtk-mml".format(kernel_version),
+-        "//kernel_device_modules-{}/drivers/misc/mediatek/vcp/rv_v2:vcp_status_v2".format(kernel_version),
++        "//kernel_device_modules-{}/drivers/misc/mediatek/vcp/rv:vcp_status".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/memory/mediatek:mtk_dramc".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/leds:leds-mtk".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/misc/mediatek/slbc:mtk_slbc".format(kernel_version),
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mml/BUILD.bazel b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mml/BUILD.bazel
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mml/BUILD.bazel
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/mediatek/mml/BUILD.bazel
+@@ -137,7 +137,7 @@
+         "//kernel_device_modules-{}/drivers/misc/mediatek/tinysys_scmi:tinysys-scmi".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/misc/mediatek/mminfra:mtk-mminfra-util".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/memory:mtk-smi".format(kernel_version),
+-    ] + (["//kernel_device_modules-{}/drivers/soc/mediatek/mmdvfs:mtk-mmdvfs-v5".format(kernel_version),]
++    ] + (["//kernel_device_modules-{}/drivers/soc/mediatek:mtk-mmdvfs-v3".format(kernel_version),]
+          if "entry_level.config" not in DEFCONFIG_OVERLAYS else []),
+ 
+     header_deps = [
+diff --git a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/cmdq/mailbox/BUILD.bazel b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/cmdq/mailbox/BUILD.bazel
+--- a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/cmdq/mailbox/BUILD.bazel
++++ b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/cmdq/mailbox/BUILD.bazel
+@@ -92,8 +92,8 @@
+         "//kernel_device_modules-{}/drivers/misc/mediatek/aee/aed:aee_aed".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/misc/mediatek/sda:irq-dbg".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/misc/mediatek/iommu:iommu_debug".format(kernel_version),
+-        "//kernel_device_modules-{}/drivers/misc/mediatek/vcp/rv_v2:vcp_status_v2".format(kernel_version),
+-        "//kernel_device_modules-{}/drivers/soc/mediatek/devapc:device-apc-common-legacy".format(kernel_version),
++        "//kernel_device_modules-{}/drivers/misc/mediatek/vcp/rv:vcp_status".format(kernel_version),
++        "//kernel_device_modules-{}/drivers/soc/mediatek/devapc:device-apc-common".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/misc/mediatek/aee/mrdump:mrdump".format(kernel_version),
+         "//kernel_device_modules-{}/drivers/misc/mediatek/mmp/src:mmprofile".format(kernel_version),
+     ],
