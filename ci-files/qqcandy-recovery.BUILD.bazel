@@ -1,0 +1,138 @@
+# Install as qqcandy_recovery/BUILD.bazel in the synchronized kernel workspace.
+# The device kernel and the Image must use identical Kleaf flags.
+
+load("//build/kernel/kleaf:kernel.bzl", "kernel_modules_install")
+
+_DEVICE_MODULES = "//kernel_device_modules-6.12"
+_VARIANT = ".mgk_64_k612.6.12.user"
+
+_USB = [
+    "drivers/clk/mediatek:clk-common",
+    "drivers/clk/mediatek:clk-mt6895",
+    "drivers/clk/mediatek:clk-mt6895-bus",
+    "drivers/clk/mediatek:clk-mt6895-peri",
+    "drivers/i2c/busses:i2c-mt65xx",
+    "drivers/mfd:mt6375",
+    "drivers/mfd:mtk-spmi-pmic",
+    "drivers/mfd:mtk-spmi-pmic-debug",
+    "drivers/misc/mediatek/aee/aed:aee_aed",
+    "drivers/misc/mediatek/aee/mrdump:mrdump",
+    "drivers/misc/mediatek/extcon:extcon-mtk-usb",
+    "drivers/misc/mediatek/irq_monitor:irq_monitor",
+    "drivers/misc/mediatek/power_throttling:pmic_lbat_service",
+    "drivers/misc/mediatek/typec/tcpc:pd_dbg_info",
+    "drivers/misc/mediatek/typec/tcpc:tcpc_class",
+    "drivers/misc/mediatek/typec/tcpc:tcpc_mt6375",
+    "drivers/misc/mediatek/usb/usb_xhci:xhci-mtk-hcd-v2",
+    "drivers/nvmem:nvmem_mtk-devinfo",
+    "drivers/phy/mediatek:phy-mtk-xsphy",
+    "drivers/pinctrl/mediatek:pinctrl-mt6895",
+    "drivers/pinctrl/mediatek:pinctrl-mtk-common-v2_debug",
+    "drivers/pinctrl/mediatek:pinctrl-mtk-v2",
+    "drivers/power/supply:adapter_class",
+    "drivers/power/supply:charger_class",
+    "drivers/power/supply:mt6375-charger",
+    "drivers/power/supply:mtk_battery_manager",
+    "drivers/power/supply:mtk_charger_algorithm_class",
+    "drivers/power/supply:mtk_charger_framework",
+    "drivers/power/supply:mtk_chg_type_det",
+    "drivers/regulator:mt6315-regulator",
+    "drivers/regulator:mt6363-regulator",
+    "drivers/regulator:mt6368-regulator",
+    "drivers/spmi:spmi-mtk-pmif",
+    "drivers/usb/mtu3:mtu3",
+]
+
+# The MT6895 board DT connects display through the MMSYS clock controllers,
+# SCPSYS, SMI, display IOMMU, MMQoS, command queue and MML. Include DT
+# suppliers explicitly because Linux module dependencies describe symbols.
+_DISPLAY = [
+    "drivers/clk/mediatek:clk-mt6895-mdpsys",
+    "drivers/clk/mediatek:clk-mt6895-mmsys",
+    "drivers/gpu/drm/mediatek/mediatek_v2:mediatek-drm",
+    "drivers/gpu/drm/mediatek/mediatek_v2:mtk_panel_ext",
+    "drivers/gpu/drm/mediatek/mml:mtk-mml-mt6895",
+    "drivers/gpu/drm/panel:oplus21143_tianma_nt36672c_dsi_vdo",
+    "drivers/interconnect/mediatek:mmqos-mt6895",
+    "drivers/iommu:mtk_iommu",
+    "drivers/leds:leds-mtk-disp",
+    "drivers/pwm:pwm-mtk-disp",
+    "drivers/soc/mediatek:mtk-scpsys-mt6895",
+]
+
+# kernel_modules_install only collects a DDK target's own output. Include
+# the display targets' DDK dependencies explicitly so depmod sees their
+# symbols. Recovery packaging then selects the actual loadable closure.
+_DISPLAY_DEPENDENCIES = [
+    "drivers/dma-buf/heaps:oplus_boost_pool_mtk",
+    "drivers/dma-buf/heaps:oplus_bsp_aizerofs",
+    "drivers/dma-buf/heaps:oplus_bsp_mm_osvelte",
+    "drivers/dma-buf/heaps:system_heap",
+    "drivers/gpu/drm/mediatek/mediatek_v2:mtk_disp_notify",
+    "drivers/gpu/drm/mediatek/mediatek_v2:mtk_sync",
+    "drivers/gpu/drm/mediatek/mml:mtk-mml",
+    "drivers/interconnect/mediatek:mmqos-common",
+    "drivers/leds:leds-mtk",
+    "drivers/memory:mtk-smi",
+    "drivers/memory/mediatek:emi",
+    "drivers/memory/mediatek:emi-mpu",
+    "drivers/memory/mediatek:mtk_dramc",
+    "drivers/misc/mediatek/boot_common:mtk_boot_common",
+    "drivers/misc/mediatek/clkbuf:clkbuf",
+    "drivers/misc/mediatek/cmdq/mailbox:mtk-cmdq-drv-ext",
+    "drivers/misc/mediatek/hwccf:hwccf",
+    "drivers/misc/mediatek/iommu:iommu_debug",
+    "drivers/misc/mediatek/iommu:iommu_secure",
+    "drivers/misc/mediatek/iommu:mtk_iommu_util",
+    "drivers/misc/mediatek/mmdvfs:mtk-mmdvfs-debug",
+    "drivers/misc/mediatek/mme:mme",
+    "drivers/misc/mediatek/mminfra:mtk-mminfra-debug",
+    "drivers/misc/mediatek/mminfra:mtk-mminfra-util",
+    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6789",
+    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6855",
+    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6858",
+    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6895",
+    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6991",
+    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6993",
+    "drivers/misc/mediatek/mm_monitor:mtk-mm-monitor-controller",
+    "drivers/misc/mediatek/mmdebug:mtk-mmdebug-vcp-stub",
+    "drivers/misc/mediatek/mmp/src:mmprofile",
+    "drivers/misc/mediatek/mtk-interconnect:mtk-icc-core",
+    "drivers/misc/mediatek/sda:irq-dbg",
+    "drivers/misc/mediatek/slbc:mtk_slbc",
+    "drivers/misc/mediatek/smi:mtk-smi-dbg",
+    "drivers/misc/mediatek/tinysys_scmi:tinysys-scmi",
+    "drivers/misc/mediatek/vcp/rv:vcp_status",
+    "drivers/misc/mediatek/vcp/rv_v2:vcp_status_v2",
+    "drivers/misc/mediatek/vmm:mtk-vmm-notifier-mt6993",
+    "drivers/rpmsg:mtk_rpmsg_mbox",
+    "drivers/soc/mediatek/devapc:device-apc-common",
+    "drivers/soc/mediatek/devapc:device-apc-common-legacy",
+    "drivers/soc/mediatek/mmdvfs:mtk-mmdvfs-v5",
+    "drivers/soc/mediatek:mtk-mbox",
+    "drivers/soc/mediatek:mtk-mmdvfs",
+    "drivers/soc/mediatek:mtk-mmdvfs-v3",
+    "drivers/soc/mediatek:mtk-scpsys",
+    "drivers/soc/mediatek:mtk_tinysys_ipi",
+    "drivers/soc/oplus/boot:buildvariant",
+    "drivers/soc/oplus/boot:oplus_bsp_boot_projectinfo",
+    "drivers/soc/oplus/boot:oplusboot",
+    "drivers/tee/gud:mcDrvModule",
+    "sound/soc/mediatek/common:mtk-afe-external",
+]
+
+kernel_modules_install(
+    name = "qqcandy_recovery_modules_install",
+    kernel_build = _DEVICE_MODULES + ":mgk_64_k612.user",
+    kernel_modules = [
+        _DEVICE_MODULES + "/" + module + _VARIANT
+        for module in _USB + _DISPLAY + _DISPLAY_DEPENDENCIES
+    ],
+    outs = [
+        "modules.alias",
+        "modules.builtin",
+        "modules.dep",
+        "modules.softdep",
+        "modules.symbols",
+    ],
+)

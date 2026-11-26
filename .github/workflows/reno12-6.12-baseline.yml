@@ -13,6 +13,7 @@ jobs:
       KERNEL_VERSION: kernel-6.12
       KLEAF_VERSION_FLAG: --//build/bazel_mgk_rules:kernel_version=6.12
       KLEAF_EMBED_FLAG: --//build/kernel/kleaf:defconfig_fragment=//kernel_device_modules-6.12:kernel/configs/qqcandy-embed.config
+      RECOVERY_MODULES_TARGET: //qqcandy_recovery:qqcandy_recovery_modules_install
     defaults:
       run:
         shell: bash
@@ -30,7 +31,7 @@ jobs:
         run: |
           set -o pipefail
           nproc; free -g | head -2; df -h / | tail -1
-          sudo apt-get update -qq && sudo apt-get install -y -qq git python3 curl unzip zip kmod
+          sudo apt-get update -qq && sudo apt-get install -y -qq git python3 curl unzip zip kmod device-tree-compiler
           mkdir -p ~/bin
           curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod +x ~/bin/repo; echo "$HOME/bin" >> $GITHUB_PATH
@@ -111,12 +112,15 @@ jobs:
           init_fix="$GITHUB_WORKSPACE/ci-patches/0003-v3f-init-sections.patch"
           usb_headers="$GITHUB_WORKSPACE/ci-patches/0004-usb-ddk-headers.patch"
           pinctrl_headers="$GITHUB_WORKSPACE/ci-patches/0005-pinctrl-ddk-eint-header.patch"
+          tianma_panel="$GITHUB_WORKSPACE/ci-patches/0006-qqcandy-tianma-panel.patch"
+          drm_headers="$GITHUB_WORKSPACE/ci-patches/0007-qqcandy-drm-ddk-headers.patch"
           fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
           printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
           git -C "$core" rev-parse HEAD
           git -C "$modules" rev-parse HEAD
           test "$(realpath -e "$(git -C "$core" rev-parse --show-toplevel)")" = "$core"
-          sha256sum "$patch" "$fdt_fix" "$init_fix" "$usb_headers" "$pinctrl_headers" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
+          sha256sum "$patch" "$fdt_fix" "$init_fix" "$usb_headers" "$pinctrl_headers" \
+            "$tianma_panel" "$drm_headers" "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
           git -C "$core" apply --check --verbose "$patch"
           git -C "$core" apply --verbose "$patch"
           git -C "$core" apply --check --verbose "$fdt_fix"
@@ -128,13 +132,35 @@ jobs:
           modules_repo="$(git -C "$modules" rev-parse --show-toplevel)"
           git -C "$modules_repo" apply --check --verbose "$pinctrl_headers"
           git -C "$modules_repo" apply --verbose "$pinctrl_headers"
+          git -C "$modules_repo" apply --check --verbose "$tianma_panel"
+          git -C "$modules_repo" apply --verbose "$tianma_panel"
+          git -C "$modules_repo" apply --check --verbose "$drm_headers"
+          git -C "$modules_repo" apply --verbose "$drm_headers"
           git -C "$core" status --short
           grep -F 'static struct mfdt_ctx ctx __initdata' "$core/arch/arm64/kernel/mtk_embed_merge.c"
           grep -Fx 'config MTK_EMBED_BOARD_DTB' "$core/arch/arm64/Kconfig"
           dtb="$core/arch/arm64/boot/dts/mediatek/qqcandy-merged.dtb"
           install -D -m 644 "$GITHUB_WORKSPACE/ci-files/board-embed.dtb" "$dtb"
+          dsi=/soc/dsi@14017000
+          host_ep="$dsi/ports/port/endpoint"
+          tianma="$dsi/panel7@0"
+          panel_ep="$tianma/port/endpoint"
+          test "$(fdtget -t s "$dtb" /odm/oplus_boardid oplus_boardid,dtsino)" = 22801
+          test "$(fdtget -t s "$dtb" "$dsi" status)" = okay
+          test "$(fdtget -t s "$dtb" "$tianma" compatible)" = 'oplus21143,tianma,nt36672c,vdo'
+          host_phandle="$(fdtget -t x "$dtb" "$host_ep" phandle)"
+          panel_phandle="$(fdtget -t x "$dtb" "$panel_ep" phandle)"
+          test "$(fdtget -t x "$dtb" "$host_ep" remote-endpoint)" = "$panel_phandle"
+          test "$(fdtget -t x "$dtb" "$panel_ep" remote-endpoint)" = "$host_phandle"
+          test "$(fdtget -t s "$dtb" "$dsi/panel6@0" status)" = disabled
+          echo 'Verified reciprocal MT6895 DSI0 graph for the 22801 Tianma NT36672C panel'
           install -m 644 "$fragment" "$modules/kernel/configs/qqcandy-embed.config"
           printf '\nexports_files(["kernel/configs/qqcandy-embed.config"])\n' >> "$modules/BUILD.bazel"
+          device_defconfig="$modules/arch/arm64/configs/mgk_64_k612_defconfig"
+          # DRM depends on the OPLUS project-info DDK module's MediaTek sources.
+          if ! grep -Fxq 'CONFIG_OPLUS_DDK_MTK=y' "$device_defconfig"; then
+            printf '\nCONFIG_OPLUS_DDK_MTK=y\n' >> "$device_defconfig"
+          fi
           # The public module tree omits the optional OPLUS voice-wake monitor.
           # Its two unconditional imports otherwise stop all device configurations.
           if [ ! -f "$modules/drivers/soc/oplus/oplus_vow_monitor/Kconfig" ]; then
@@ -147,16 +173,18 @@ jobs:
           fi
           sha256sum "$core/arch/arm64/kernel/mtk_embed_merge.c" "$dtb"
 
-      - name: Check the USB module build graph and device configuration
+      - name: Check the recovery module build graph and device configuration
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/ws/kernel"
-          mkdir -p qqcandy_usb
-          install -m 644 "$GITHUB_WORKSPACE/ci-files/qqcandy-usb.BUILD.bazel" qqcandy_usb/BUILD.bazel
+          mkdir -p qqcandy_recovery
+          install -m 644 "$GITHUB_WORKSPACE/ci-files/qqcandy-recovery.BUILD.bazel" qqcandy_recovery/BUILD.bazel
           ./tools/bazel build "$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" --nobuild \
-            //qqcandy_usb:qqcandy_usb_modules_install 2>&1 | tee ../usb_analysis.log
+            "$RECOVERY_MODULES_TARGET" 2>&1 | tee ../recovery_analysis.log
           ./tools/bazel build "$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG" \
             //kernel_device_modules-6.12:mgk_64_k612.user_config 2>&1 | tee ../device_config_build.log
+          device_config_dir=bazel-bin/kernel_device_modules-6.12/mgk_64_k612.user_config/out_dir
+          grep -Fx 'CONFIG_OPLUS_DDK_MTK=y' "$device_config_dir/.config"
 
       - name: B and C build configuration and verify the linked DTB
         run: |
@@ -209,20 +237,19 @@ jobs:
           path: |
             ${{ runner.temp }}/ws/kernel/bazel-bin/kernel_device_modules-6.12/mgk_64_k612_kernel_aarch64.user/Image*
 
-      - name: D build the same-kernel USB modules and run depmod
+      - name: D build the same-kernel USB and DRM modules and run depmod
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/ws/kernel"
           flags=("$KLEAF_VERSION_FLAG" "$KLEAF_EMBED_FLAG")
-          usb_target=//qqcandy_usb:qqcandy_usb_modules_install
           device_target=//kernel_device_modules-6.12:mgk_64_k612.user
-          ./tools/bazel build "${flags[@]}" --keep_going "$usb_target" 2>&1 | tee ../usb_build.log
-          if grep -iE 'needs unknown symbol|disagrees about version|depmod: ERROR' ../usb_build.log; then
-            echo 'The USB module set has unresolved symbols' >&2
+          ./tools/bazel build "${flags[@]}" --keep_going "$RECOVERY_MODULES_TARGET" 2>&1 | tee ../recovery_build.log
+          if grep -iE 'needs unknown symbol|disagrees about version|depmod: ERROR' ../recovery_build.log; then
+            echo 'The recovery module set has unresolved symbols' >&2
             exit 1
           fi
-          ./tools/bazel cquery "${flags[@]}" --output=files "$usb_target" | tee ../usb_outputs.log
-          deps="$(awk '/\/qqcandy_usb\/qqcandy_usb_modules_install\/modules[.]dep$/ {print}' ../usb_outputs.log)"
+          ./tools/bazel cquery "${flags[@]}" --output=files "$RECOVERY_MODULES_TARGET" | tee ../recovery_outputs.log
+          deps="$(awk '/\/qqcandy_recovery\/qqcandy_recovery_modules_install\/modules[.]dep$/ {print}' ../recovery_outputs.log)"
           test -s "$deps"
           ./tools/bazel cquery "${flags[@]}" --output_groups=+modules_staging_archive --output=files "$device_target" | tee ../device_outputs.log
           base_archive="$(awk '/\/mgk_64_k612[.]user\/modules_staging_dir[.]tar[.]gz$/ {print}' ../device_outputs.log)"
@@ -230,6 +257,9 @@ jobs:
           stage=../qqcandy-recovery-modules
           mkdir -p "$stage"
           cp -L -- "$(dirname "$deps")"/*.ko "$(dirname "$deps")"/modules.* "$base_archive" "$stage/"
+          for module in mediatek-drm.ko oplus21143_tianma_nt36672c_dsi_vdo.ko; do
+            test -s "$stage/$module"
+          done
           tar tf "$stage/modules_staging_dir.tar.gz" > ../device_archive_files.log
           release="$(sed -E 's|^[.]/||' ../device_archive_files.log | awk -F/ '$1 == "lib" && $2 == "modules" && $3 != "" {print $3}' | sort -u)"
           test -n "$release"
@@ -237,10 +267,10 @@ jobs:
             vermagic="$(modinfo -F vermagic "$module")"
             printf '%s %s\n' "$(basename "$module")" "$vermagic"
             test "${vermagic%% *}" = "$release"
-          done | tee ../usb_vermagic.log
-          sha256sum "$stage"/* | tee ../usb_sha256.log
+          done | tee ../recovery_vermagic.log
+          sha256sum "$stage"/* | tee ../recovery_sha256.log
 
-      - name: upload USB build inputs for recovery packaging
+      - name: upload USB and DRM build inputs for recovery packaging
         uses: actions/upload-artifact@v4
         with:
           name: qqcandy-recovery-modules
@@ -252,7 +282,7 @@ jobs:
         run: |
           cd $RUNNER_TEMP/ws || exit 0
           : > first_error.log
-          for f in sync.log a5.log usb_analysis.log device_config_build.log config_build.log bazel_build.log usb_build.log; do
+          for f in sync.log a5.log recovery_analysis.log device_config_build.log config_build.log bazel_build.log recovery_build.log; do
             [ -f "$f" ] || continue
             echo "### $f" >> first_error.log
             if match="$(grep -n -m1 -iE 'No such file|error:|couldn.t find|FAILED:' "$f")"; then

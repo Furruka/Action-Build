@@ -1,0 +1,13 @@
+# MT6895 display suppliers, then the DRM master, Tianma panel and backlight.
+clk-mt6895-mmsys.ko
+clk-mt6895-mdpsys.ko
+mtk-scpsys-mt6895.ko
+mtk-smi.ko
+mmqos-mt6895.ko
+mtk_iommu.ko
+mtk-cmdq-drv-ext.ko
+mtk-mml-mt6895.ko
+pwm-mtk-disp.ko
+mediatek-drm.ko
+oplus21143_tianma_nt36672c_dsi_vdo.ko
+leds-mtk-disp.ko

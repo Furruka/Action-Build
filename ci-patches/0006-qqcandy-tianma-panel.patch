@@ -1,0 +1,1184 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/panel/BUILD.bazel b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/panel/BUILD.bazel
+--- a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/panel/BUILD.bazel
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/panel/BUILD.bazel
+@@ -52,6 +52,27 @@
+         "rt4831a.h",
+     ],
+     includes = ["."],
++)
++
++# Stock QQcandy LCD hardware port for the MT6895 display host.
++define_mgk_ddk_ko(
++    name = "oplus21143_tianma_nt36672c_dsi_vdo",
++    srcs = [
++        "oplus21143_tianma_nt36672c_dsi_vdo.c",
++    ],
++    header_deps = [
++        "//kernel_device_modules-{}/drivers/gpu/drm/mediatek/mediatek_v2:ddk_public_headers".format(kernel_version),
++    ],
++    ko_deps = [
++        "//kernel_device_modules-{}/drivers/gpu/drm/mediatek/mediatek_v2:mtk_panel_ext".format(kernel_version),
++    ],
++    # Match the conditional MediaTek panel extension layouts in the DRM hosts.
++    local_defines = [
++        "OPLUS_FEATURE_DISPLAY",
++        "OPLUS_FEATURE_DISPLAY_ADFR",
++        "OPLUS_FEATURE_DISPLAY_HPWM",
++        "OPLUS_FEATURE_DISPLAY_ONSCREENFINGERPRINT",
++    ],
+ )
+ 
+ PANELS = [
+diff --git a/kernel/kernel_device_modules-6.12/drivers/gpu/drm/panel/oplus21143_tianma_nt36672c_dsi_vdo.c b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/panel/oplus21143_tianma_nt36672c_dsi_vdo.c
+new file mode 100644
+--- /dev/null
++++ b/kernel/kernel_device_modules-6.12/drivers/gpu/drm/panel/oplus21143_tianma_nt36672c_dsi_vdo.c
+@@ -0,0 +1,1148 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (c) 2019 MediaTek Inc.
++ *
++ * OPPO 21143/22801 Tianma NT36672C, ported from the MT6895 vendor kernel.
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of_graph.h>
++#include <linux/regulator/consumer.h>
++#include <linux/slab.h>
++#include <video/mipi_display.h>
++
++#include <drm/drm_connector.h>
++#include <drm/drm_device.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++
++#include "mtk_panel_ext.h"
++#include "mtk_drm_graphics_base.h"
++
++#define QQCANDY_BIAS_ADDR 0x3e
++#define QQCANDY_DEFAULT_BRIGHTNESS 1023
++#define QQCANDY_MAX_BRIGHTNESS 4095
++
++struct qqcandy_panel {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct regulator *vufsldo;
++	struct gpio_desc *reset;
++	struct gpio_desc *bias_pos;
++	struct gpio_desc *bias_neg;
++	bool powered;
++	int transfer_error;
++};
++
++/* The stock board describes one LCD bias controller on a separate bus. */
++static DEFINE_MUTEX(qqcandy_bias_lock);
++static struct i2c_client *qqcandy_bias_client;
++
++static int qqcandy_bias_probe(struct i2c_client *client)
++{
++	int ret = 0;
++
++	if (client->addr != QQCANDY_BIAS_ADDR)
++		return -ENODEV;
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
++		return -EOPNOTSUPP;
++
++	mutex_lock(&qqcandy_bias_lock);
++	if (qqcandy_bias_client)
++		ret = -EBUSY;
++	else
++		qqcandy_bias_client = client;
++	mutex_unlock(&qqcandy_bias_lock);
++
++	return ret;
++}
++
++static void qqcandy_bias_remove(struct i2c_client *client)
++{
++	mutex_lock(&qqcandy_bias_lock);
++	qqcandy_bias_client = NULL;
++	mutex_unlock(&qqcandy_bias_lock);
++}
++
++static const struct of_device_id qqcandy_bias_of_match[] = {
++	{ .compatible = "mediatek,I2C_LCD_BIAS" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, qqcandy_bias_of_match);
++
++static struct i2c_driver qqcandy_bias_driver = {
++	.probe = qqcandy_bias_probe,
++	.remove = qqcandy_bias_remove,
++	.driver = {
++		.name = "qqcandy-lcd-bias",
++		.of_match_table = qqcandy_bias_of_match,
++	},
++};
++
++static int qqcandy_bias_configure(void)
++{
++	const u8 value[] = { 0x03, 0x43 };
++	int ret = -EPROBE_DEFER;
++
++	mutex_lock(&qqcandy_bias_lock);
++	if (qqcandy_bias_client) {
++		ret = i2c_master_send(qqcandy_bias_client, value, sizeof(value));
++		if (ret == (int)sizeof(value))
++			ret = 0;
++		else if (ret >= 0)
++			ret = -EIO;
++	}
++	mutex_unlock(&qqcandy_bias_lock);
++
++	return ret;
++}
++
++static struct qqcandy_panel *to_qqcandy_panel(struct drm_panel *panel)
++{
++	return container_of(panel, struct qqcandy_panel, panel);
++}
++
++static void qqcandy_dsi_write(struct qqcandy_panel *ctx, const u8 *data, size_t len)
++{
++	ssize_t ret;
++
++	if (ctx->transfer_error)
++		return;
++
++	if (data[0] < 0xb0)
++		ret = mipi_dsi_dcs_write_buffer(ctx->dsi, data, len);
++	else
++		ret = mipi_dsi_generic_write(ctx->dsi, data, len);
++
++	if (ret < 0) {
++		dev_err(&ctx->dsi->dev, "panel command %#x failed: %zd\n", data[0], ret);
++		ctx->transfer_error = ret;
++	}
++}
++
++#define qqcandy_dsi_write_seq(ctx, ...) do {				\
++	static const u8 data[] = { __VA_ARGS__ };				\
++	qqcandy_dsi_write(ctx, data, ARRAY_SIZE(data));			\
++} while (0)
++
++static unsigned int qqcandy_brightness = QQCANDY_DEFAULT_BRIGHTNESS;
++static unsigned int qqcandy_cabc = 1;
++static bool qqcandy_low_gamma;
++static bool qqcandy_dimming;
++
++static void qqcandy_panel_init(struct qqcandy_panel *ctx)
++{
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x10);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x36, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x3b, 0x03, 0x14, 0x36, 0x04, 0x04);
++	qqcandy_dsi_write_seq(ctx, 0xb0, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0xc0, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0xc1, 0x89, 0x28, 0x00, 0x0c, 0x00, 0xaa, 0x02, 0x0e, 0x00,
++			      0x43, 0x00, 0x07, 0x08, 0xbb, 0x08, 0x7a);
++	qqcandy_dsi_write_seq(ctx, 0xc2, 0x1b, 0xa0);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x20);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x01, 0x66);
++	qqcandy_dsi_write_seq(ctx, 0x06, 0x64);
++	qqcandy_dsi_write_seq(ctx, 0x07, 0x28);
++	qqcandy_dsi_write_seq(ctx, 0x17, 0x66);
++	qqcandy_dsi_write_seq(ctx, 0x1b, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x2f, 0x83);
++	qqcandy_dsi_write_seq(ctx, 0x5c, 0x90);
++	qqcandy_dsi_write_seq(ctx, 0x5e, 0xb6);
++	qqcandy_dsi_write_seq(ctx, 0x69, 0xd0);
++	qqcandy_dsi_write_seq(ctx, 0x95, 0xd1);
++	qqcandy_dsi_write_seq(ctx, 0x96, 0xd1);
++	qqcandy_dsi_write_seq(ctx, 0xf2, 0x65);
++	qqcandy_dsi_write_seq(ctx, 0xf3, 0x54);
++	qqcandy_dsi_write_seq(ctx, 0xf4, 0x65);
++	qqcandy_dsi_write_seq(ctx, 0xf5, 0x54);
++	qqcandy_dsi_write_seq(ctx, 0xf6, 0x65);
++	qqcandy_dsi_write_seq(ctx, 0xf7, 0x54);
++	qqcandy_dsi_write_seq(ctx, 0xf8, 0x65);
++	qqcandy_dsi_write_seq(ctx, 0xf9, 0x54);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x23);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x00, 0x80);
++	qqcandy_dsi_write_seq(ctx, 0x07, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x08, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x09, 0x04);
++	qqcandy_dsi_write_seq(ctx, 0x11, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x12, 0x96);
++	qqcandy_dsi_write_seq(ctx, 0x15, 0x68);
++	qqcandy_dsi_write_seq(ctx, 0x16, 0x0b);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x24);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x03, 0x13);
++	qqcandy_dsi_write_seq(ctx, 0x04, 0x15);
++	qqcandy_dsi_write_seq(ctx, 0x05, 0x17);
++	qqcandy_dsi_write_seq(ctx, 0x09, 0x26);
++	qqcandy_dsi_write_seq(ctx, 0x0a, 0x27);
++	qqcandy_dsi_write_seq(ctx, 0x0b, 0x28);
++	qqcandy_dsi_write_seq(ctx, 0x0c, 0x24);
++	qqcandy_dsi_write_seq(ctx, 0x0d, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x0e, 0x2f);
++	qqcandy_dsi_write_seq(ctx, 0x0f, 0x2d);
++	qqcandy_dsi_write_seq(ctx, 0x10, 0x2e);
++	qqcandy_dsi_write_seq(ctx, 0x11, 0x2c);
++	qqcandy_dsi_write_seq(ctx, 0x12, 0x8b);
++	qqcandy_dsi_write_seq(ctx, 0x13, 0x8c);
++	qqcandy_dsi_write_seq(ctx, 0x16, 0x0f);
++	qqcandy_dsi_write_seq(ctx, 0x17, 0x22);
++	qqcandy_dsi_write_seq(ctx, 0x1b, 0x13);
++	qqcandy_dsi_write_seq(ctx, 0x1c, 0x15);
++	qqcandy_dsi_write_seq(ctx, 0x1d, 0x17);
++	qqcandy_dsi_write_seq(ctx, 0x21, 0x26);
++	qqcandy_dsi_write_seq(ctx, 0x22, 0x27);
++	qqcandy_dsi_write_seq(ctx, 0x23, 0x28);
++	qqcandy_dsi_write_seq(ctx, 0x24, 0x24);
++	qqcandy_dsi_write_seq(ctx, 0x25, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x26, 0x2f);
++	qqcandy_dsi_write_seq(ctx, 0x27, 0x2d);
++	qqcandy_dsi_write_seq(ctx, 0x28, 0x2e);
++	qqcandy_dsi_write_seq(ctx, 0x29, 0x2c);
++	qqcandy_dsi_write_seq(ctx, 0x2a, 0x8b);
++	qqcandy_dsi_write_seq(ctx, 0x2b, 0x8c);
++	qqcandy_dsi_write_seq(ctx, 0x30, 0x0f);
++	qqcandy_dsi_write_seq(ctx, 0x31, 0x22);
++	qqcandy_dsi_write_seq(ctx, 0x32, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x33, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x35, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x36, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x4e, 0x2f);
++	qqcandy_dsi_write_seq(ctx, 0x4f, 0x30);
++	qqcandy_dsi_write_seq(ctx, 0x53, 0x2f);
++	qqcandy_dsi_write_seq(ctx, 0x71, 0x28);
++	qqcandy_dsi_write_seq(ctx, 0x77, 0x80);
++	qqcandy_dsi_write_seq(ctx, 0x79, 0x04);
++	qqcandy_dsi_write_seq(ctx, 0x7a, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x7b, 0x8d);
++	qqcandy_dsi_write_seq(ctx, 0x7d, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x80, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x81, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x82, 0x13);
++	qqcandy_dsi_write_seq(ctx, 0x84, 0x31);
++	qqcandy_dsi_write_seq(ctx, 0x85, 0x13);
++	qqcandy_dsi_write_seq(ctx, 0x86, 0x22);
++	qqcandy_dsi_write_seq(ctx, 0x87, 0x31);
++	qqcandy_dsi_write_seq(ctx, 0x90, 0x13);
++	qqcandy_dsi_write_seq(ctx, 0x92, 0x31);
++	qqcandy_dsi_write_seq(ctx, 0x93, 0x13);
++	qqcandy_dsi_write_seq(ctx, 0x94, 0x22);
++	qqcandy_dsi_write_seq(ctx, 0x95, 0x31);
++	qqcandy_dsi_write_seq(ctx, 0x9c, 0xf4);
++	qqcandy_dsi_write_seq(ctx, 0x9d, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0xa0, 0x0d);
++	qqcandy_dsi_write_seq(ctx, 0xa2, 0x0d);
++	qqcandy_dsi_write_seq(ctx, 0xa3, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0xa4, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0xa5, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0xc6, 0x40);
++	qqcandy_dsi_write_seq(ctx, 0xc9, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0xd9, 0x80);
++	qqcandy_dsi_write_seq(ctx, 0xe9, 0x02);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x25);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x0f, 0x1b);
++	qqcandy_dsi_write_seq(ctx, 0x18, 0x20);
++	qqcandy_dsi_write_seq(ctx, 0x19, 0xe4);
++	qqcandy_dsi_write_seq(ctx, 0x20, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x21, 0x40);
++	qqcandy_dsi_write_seq(ctx, 0x66, 0x40);
++	qqcandy_dsi_write_seq(ctx, 0x67, 0x29);
++	qqcandy_dsi_write_seq(ctx, 0x68, 0x50);
++	qqcandy_dsi_write_seq(ctx, 0x69, 0x60);
++	qqcandy_dsi_write_seq(ctx, 0x6b, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x71, 0x6d);
++	qqcandy_dsi_write_seq(ctx, 0x77, 0x60);
++	qqcandy_dsi_write_seq(ctx, 0x78, 0xa5);
++	qqcandy_dsi_write_seq(ctx, 0x7d, 0x40);
++	qqcandy_dsi_write_seq(ctx, 0x7e, 0x2d);
++	qqcandy_dsi_write_seq(ctx, 0xc0, 0x4d);
++	qqcandy_dsi_write_seq(ctx, 0xc1, 0xa9);
++	qqcandy_dsi_write_seq(ctx, 0xc2, 0xd2);
++	qqcandy_dsi_write_seq(ctx, 0xc4, 0x11);
++	qqcandy_dsi_write_seq(ctx, 0xd6, 0x80);
++	qqcandy_dsi_write_seq(ctx, 0xd7, 0x82);
++	qqcandy_dsi_write_seq(ctx, 0xda, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0xdd, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0xe0, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0xf0, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0xf1, 0x04);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x26);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x00, 0x10);
++	qqcandy_dsi_write_seq(ctx, 0x01, 0xeb);
++	qqcandy_dsi_write_seq(ctx, 0x03, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x04, 0xeb);
++	qqcandy_dsi_write_seq(ctx, 0x05, 0x08);
++	qqcandy_dsi_write_seq(ctx, 0x06, 0x0e);
++	qqcandy_dsi_write_seq(ctx, 0x08, 0x0e);
++	qqcandy_dsi_write_seq(ctx, 0x14, 0x06);
++	qqcandy_dsi_write_seq(ctx, 0x15, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x74, 0xaf);
++	qqcandy_dsi_write_seq(ctx, 0x81, 0x0d);
++	qqcandy_dsi_write_seq(ctx, 0x83, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x84, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x85, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x86, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x87, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x88, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x8a, 0x1a);
++	qqcandy_dsi_write_seq(ctx, 0x8b, 0x11);
++	qqcandy_dsi_write_seq(ctx, 0x8c, 0x24);
++	qqcandy_dsi_write_seq(ctx, 0x8e, 0x42);
++	qqcandy_dsi_write_seq(ctx, 0x8f, 0x11);
++	qqcandy_dsi_write_seq(ctx, 0x90, 0x11);
++	qqcandy_dsi_write_seq(ctx, 0x91, 0x11);
++	qqcandy_dsi_write_seq(ctx, 0x9a, 0x80);
++	qqcandy_dsi_write_seq(ctx, 0x9b, 0x04);
++	qqcandy_dsi_write_seq(ctx, 0x9c, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x9d, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x9e, 0x00);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x27);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x01, 0x6c);
++	qqcandy_dsi_write_seq(ctx, 0x20, 0x81);
++	qqcandy_dsi_write_seq(ctx, 0x21, 0x6b);
++	qqcandy_dsi_write_seq(ctx, 0x25, 0x81);
++	qqcandy_dsi_write_seq(ctx, 0x26, 0x96);
++	qqcandy_dsi_write_seq(ctx, 0x6e, 0x23);
++	qqcandy_dsi_write_seq(ctx, 0x6f, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x70, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x71, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x72, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x73, 0x21);
++	qqcandy_dsi_write_seq(ctx, 0x74, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x75, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x76, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x77, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x7d, 0x09);
++	qqcandy_dsi_write_seq(ctx, 0x7e, 0x6f);
++	qqcandy_dsi_write_seq(ctx, 0x80, 0x23);
++	qqcandy_dsi_write_seq(ctx, 0x82, 0x09);
++	qqcandy_dsi_write_seq(ctx, 0x83, 0x6f);
++	qqcandy_dsi_write_seq(ctx, 0x88, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x89, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0xe3, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0xe4, 0xe4);
++	qqcandy_dsi_write_seq(ctx, 0xe5, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0xe6, 0xd7);
++	qqcandy_dsi_write_seq(ctx, 0xe9, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0xea, 0x1d);
++	qqcandy_dsi_write_seq(ctx, 0xeb, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0xec, 0x2b);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x2a);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x00, 0x91);
++	qqcandy_dsi_write_seq(ctx, 0x03, 0x20);
++	qqcandy_dsi_write_seq(ctx, 0x07, 0x64);
++	qqcandy_dsi_write_seq(ctx, 0x0a, 0x70);
++	qqcandy_dsi_write_seq(ctx, 0x0c, 0x09);
++	qqcandy_dsi_write_seq(ctx, 0x0d, 0x40);
++	qqcandy_dsi_write_seq(ctx, 0x0e, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x0f, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x11, 0xf1);
++	qqcandy_dsi_write_seq(ctx, 0x15, 0x0e);
++	qqcandy_dsi_write_seq(ctx, 0x16, 0xb9);
++	qqcandy_dsi_write_seq(ctx, 0x19, 0x0e);
++	qqcandy_dsi_write_seq(ctx, 0x1a, 0x8d);
++	qqcandy_dsi_write_seq(ctx, 0x1b, 0x14);
++	qqcandy_dsi_write_seq(ctx, 0x1d, 0x36);
++	qqcandy_dsi_write_seq(ctx, 0x1e, 0x36);
++	qqcandy_dsi_write_seq(ctx, 0x1f, 0x36);
++	qqcandy_dsi_write_seq(ctx, 0x20, 0x37);
++	qqcandy_dsi_write_seq(ctx, 0x28, 0xe1);
++	qqcandy_dsi_write_seq(ctx, 0x29, 0x1f);
++	qqcandy_dsi_write_seq(ctx, 0x2a, 0xff);
++	qqcandy_dsi_write_seq(ctx, 0x2b, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x2d, 0x05);
++	qqcandy_dsi_write_seq(ctx, 0x2f, 0x06);
++	qqcandy_dsi_write_seq(ctx, 0x30, 0x1e);
++	qqcandy_dsi_write_seq(ctx, 0x31, 0x8d);
++	qqcandy_dsi_write_seq(ctx, 0x33, 0x1e);
++	qqcandy_dsi_write_seq(ctx, 0x34, 0xe3);
++	qqcandy_dsi_write_seq(ctx, 0x35, 0x45);
++	qqcandy_dsi_write_seq(ctx, 0x36, 0xcb);
++	qqcandy_dsi_write_seq(ctx, 0x37, 0xdc);
++	qqcandy_dsi_write_seq(ctx, 0x38, 0x4b);
++	qqcandy_dsi_write_seq(ctx, 0x39, 0xc5);
++	qqcandy_dsi_write_seq(ctx, 0x3a, 0x1e);
++	qqcandy_dsi_write_seq(ctx, 0x46, 0x40);
++	qqcandy_dsi_write_seq(ctx, 0x47, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x4a, 0xf1);
++	qqcandy_dsi_write_seq(ctx, 0x4e, 0x0e);
++	qqcandy_dsi_write_seq(ctx, 0x4f, 0xb9);
++	qqcandy_dsi_write_seq(ctx, 0x52, 0x0e);
++	qqcandy_dsi_write_seq(ctx, 0x53, 0x8d);
++	qqcandy_dsi_write_seq(ctx, 0x54, 0x14);
++	qqcandy_dsi_write_seq(ctx, 0x56, 0x36);
++	qqcandy_dsi_write_seq(ctx, 0x57, 0x4e);
++	qqcandy_dsi_write_seq(ctx, 0x58, 0x4e);
++	qqcandy_dsi_write_seq(ctx, 0x59, 0x4e);
++	qqcandy_dsi_write_seq(ctx, 0x60, 0x80);
++	qqcandy_dsi_write_seq(ctx, 0x61, 0xdf);
++	qqcandy_dsi_write_seq(ctx, 0x62, 0x17);
++	qqcandy_dsi_write_seq(ctx, 0x63, 0xdb);
++	qqcandy_dsi_write_seq(ctx, 0x65, 0x05);
++	qqcandy_dsi_write_seq(ctx, 0x66, 0x04);
++	qqcandy_dsi_write_seq(ctx, 0x67, 0x54);
++	qqcandy_dsi_write_seq(ctx, 0x68, 0xa5);
++	qqcandy_dsi_write_seq(ctx, 0x6a, 0xe0);
++	qqcandy_dsi_write_seq(ctx, 0x6b, 0xe1);
++	qqcandy_dsi_write_seq(ctx, 0x6c, 0x30);
++	qqcandy_dsi_write_seq(ctx, 0x6d, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x6e, 0xdc);
++	qqcandy_dsi_write_seq(ctx, 0x6f, 0x34);
++	qqcandy_dsi_write_seq(ctx, 0x70, 0xfc);
++	qqcandy_dsi_write_seq(ctx, 0x71, 0x14);
++	qqcandy_dsi_write_seq(ctx, 0x7a, 0x0e);
++	qqcandy_dsi_write_seq(ctx, 0x7b, 0x40);
++	qqcandy_dsi_write_seq(ctx, 0x7c, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x7f, 0xa0);
++	qqcandy_dsi_write_seq(ctx, 0x83, 0x0e);
++	qqcandy_dsi_write_seq(ctx, 0x84, 0xb9);
++	qqcandy_dsi_write_seq(ctx, 0x87, 0x0e);
++	qqcandy_dsi_write_seq(ctx, 0x88, 0x8d);
++	qqcandy_dsi_write_seq(ctx, 0x89, 0x14);
++	qqcandy_dsi_write_seq(ctx, 0x8b, 0x36);
++	qqcandy_dsi_write_seq(ctx, 0x8c, 0x75);
++	qqcandy_dsi_write_seq(ctx, 0x8d, 0x75);
++	qqcandy_dsi_write_seq(ctx, 0x8e, 0x75);
++	qqcandy_dsi_write_seq(ctx, 0x95, 0x80);
++	qqcandy_dsi_write_seq(ctx, 0x96, 0x99);
++	qqcandy_dsi_write_seq(ctx, 0x97, 0x0b);
++	qqcandy_dsi_write_seq(ctx, 0x98, 0xf3);
++	qqcandy_dsi_write_seq(ctx, 0x9a, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x9b, 0x03);
++	qqcandy_dsi_write_seq(ctx, 0x9c, 0x0f);
++	qqcandy_dsi_write_seq(ctx, 0x9d, 0x73);
++	qqcandy_dsi_write_seq(ctx, 0x9f, 0xe7);
++	qqcandy_dsi_write_seq(ctx, 0xa0, 0x9b);
++	qqcandy_dsi_write_seq(ctx, 0xa2, 0x21);
++	qqcandy_dsi_write_seq(ctx, 0xa3, 0xaa);
++	qqcandy_dsi_write_seq(ctx, 0xa4, 0x98);
++	qqcandy_dsi_write_seq(ctx, 0xa5, 0x23);
++	qqcandy_dsi_write_seq(ctx, 0xa6, 0xa8);
++	qqcandy_dsi_write_seq(ctx, 0xa7, 0x0f);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x2c);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x00, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x01, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x02, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x03, 0x12);
++	qqcandy_dsi_write_seq(ctx, 0x04, 0x12);
++	qqcandy_dsi_write_seq(ctx, 0x05, 0x12);
++	qqcandy_dsi_write_seq(ctx, 0x0d, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x0e, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x17, 0x42);
++	qqcandy_dsi_write_seq(ctx, 0x18, 0x42);
++	qqcandy_dsi_write_seq(ctx, 0x19, 0x42);
++	qqcandy_dsi_write_seq(ctx, 0x2d, 0xaf);
++	qqcandy_dsi_write_seq(ctx, 0x2f, 0x10);
++	qqcandy_dsi_write_seq(ctx, 0x30, 0xeb);
++	qqcandy_dsi_write_seq(ctx, 0x32, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x33, 0xeb);
++	qqcandy_dsi_write_seq(ctx, 0x35, 0x14);
++	qqcandy_dsi_write_seq(ctx, 0x37, 0x14);
++	qqcandy_dsi_write_seq(ctx, 0x4d, 0x12);
++	qqcandy_dsi_write_seq(ctx, 0x4e, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x4f, 0x0b);
++	qqcandy_dsi_write_seq(ctx, 0x53, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x54, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x55, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x56, 0x1f);
++	qqcandy_dsi_write_seq(ctx, 0x58, 0x1f);
++	qqcandy_dsi_write_seq(ctx, 0x59, 0x1f);
++	qqcandy_dsi_write_seq(ctx, 0x61, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x62, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x6b, 0x69);
++	qqcandy_dsi_write_seq(ctx, 0x6c, 0x69);
++	qqcandy_dsi_write_seq(ctx, 0x6d, 0x69);
++	qqcandy_dsi_write_seq(ctx, 0x80, 0xaf);
++	qqcandy_dsi_write_seq(ctx, 0x81, 0x10);
++	qqcandy_dsi_write_seq(ctx, 0x82, 0xeb);
++	qqcandy_dsi_write_seq(ctx, 0x84, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x85, 0xeb);
++	qqcandy_dsi_write_seq(ctx, 0x87, 0x1e);
++	qqcandy_dsi_write_seq(ctx, 0x89, 0x1e);
++	qqcandy_dsi_write_seq(ctx, 0x9d, 0x1f);
++	qqcandy_dsi_write_seq(ctx, 0x9e, 0x02);
++	qqcandy_dsi_write_seq(ctx, 0x9f, 0x0b);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0xe0);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x35, 0x82);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0xf0);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x1c, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x33, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x5a, 0x00);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0xd0);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x53, 0x22);
++	qqcandy_dsi_write_seq(ctx, 0x54, 0x02);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0xc0);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x9c, 0x11);
++	qqcandy_dsi_write_seq(ctx, 0x9d, 0x11);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x2b);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0xb7, 0x21);
++	qqcandy_dsi_write_seq(ctx, 0xb8, 0x12);
++	qqcandy_dsi_write_seq(ctx, 0xc0, 0x01);
++
++	qqcandy_dsi_write_seq(ctx, 0xff, 0x10);
++	qqcandy_dsi_write_seq(ctx, 0xfb, 0x01);
++	qqcandy_dsi_write_seq(ctx, 0x53, 0x24);
++	qqcandy_dsi_write_seq(ctx, 0x35, 0x00);
++	qqcandy_dsi_write_seq(ctx, 0x11, 0x00);
++	usleep_range(105000, 105100);
++	qqcandy_dsi_write_seq(ctx, 0x29, 0x00);
++	usleep_range(45000, 45100);
++}
++
++static int qqcandy_power_off(struct drm_panel *panel)
++{
++	struct qqcandy_panel *ctx = to_qqcandy_panel(panel);
++	int ret;
++
++	if (!ctx->powered)
++		return 0;
++
++	gpiod_set_value_cansleep(ctx->bias_neg, 0);
++	usleep_range(5000, 5100);
++	gpiod_set_value_cansleep(ctx->bias_pos, 0);
++	usleep_range(5000, 5100);
++	ret = regulator_disable(ctx->vufsldo);
++	if (!ret)
++		ctx->powered = false;
++	usleep_range(70000, 70100);
++	return ret;
++}
++
++static void qqcandy_release_supply(void *data)
++{
++	struct qqcandy_panel *ctx = data;
++
++	if (ctx->powered)
++		regulator_disable(ctx->vufsldo);
++}
++
++static int qqcandy_power_on(struct drm_panel *panel)
++{
++	struct qqcandy_panel *ctx = to_qqcandy_panel(panel);
++	int ret;
++
++	if (ctx->powered)
++		return 0;
++
++	usleep_range(5000, 5100);
++	ret = regulator_enable(ctx->vufsldo);
++	if (ret)
++		return ret;
++
++	ctx->powered = true;
++	usleep_range(5000, 5100);
++	gpiod_set_value_cansleep(ctx->bias_pos, 1);
++	usleep_range(5000, 5100);
++	gpiod_set_value_cansleep(ctx->bias_neg, 1);
++	usleep_range(5000, 5100);
++	ret = qqcandy_bias_configure();
++	if (ret) {
++		qqcandy_power_off(panel);
++		return ret;
++	}
++	usleep_range(5000, 5100);
++	return 0;
++}
++
++static int qqcandy_prepare(struct drm_panel *panel)
++{
++	struct qqcandy_panel *ctx = to_qqcandy_panel(panel);
++	const u8 brightness[] = {
++		MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
++		qqcandy_brightness >> 8, qqcandy_brightness & 0xff,
++	};
++	int ret;
++
++	ret = qqcandy_power_on(panel);
++	if (ret)
++		return ret;
++
++	usleep_range(12000, 12100);
++	gpiod_set_value_cansleep(ctx->reset, 1);
++	usleep_range(5000, 5100);
++	gpiod_set_value_cansleep(ctx->reset, 0);
++	usleep_range(5000, 5100);
++	gpiod_set_value_cansleep(ctx->reset, 1);
++	usleep_range(15000, 15100);
++
++	ctx->transfer_error = 0;
++	qqcandy_panel_init(ctx);
++	qqcandy_dsi_write(ctx, brightness, sizeof(brightness));
++	ret = ctx->transfer_error;
++	if (ret) {
++		gpiod_set_value_cansleep(ctx->reset, 0);
++		qqcandy_power_off(panel);
++	}
++	return ret;
++}
++
++static int qqcandy_unprepare(struct drm_panel *panel)
++{
++	struct qqcandy_panel *ctx = to_qqcandy_panel(panel);
++
++	ctx->transfer_error = 0;
++	qqcandy_dsi_write_seq(ctx, MIPI_DCS_SET_DISPLAY_OFF);
++	usleep_range(25000, 25100);
++	qqcandy_dsi_write_seq(ctx, MIPI_DCS_ENTER_SLEEP_MODE);
++	usleep_range(70000, 70100);
++	gpiod_set_value_cansleep(ctx->reset, 0);
++	usleep_range(5000, 5100);
++
++	/* The DSI host disables link clocks before calling panel_poweroff. */
++	return 0;
++}
++
++static int qqcandy_reset(struct drm_panel *panel, int on)
++{
++	struct qqcandy_panel *ctx = to_qqcandy_panel(panel);
++
++	gpiod_set_value_cansleep(ctx->reset, on);
++	return 0;
++}
++
++static const struct drm_display_mode qqcandy_modes[] = {
++	{
++		.clock = 373644,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 81,
++		.hsync_end = 1080 + 81 + 22,
++		.htotal = 1080 + 81 + 22 + 70,
++		.vdisplay = 2412,
++		.vsync_start = 2412 + 2538,
++		.vsync_end = 2412 + 2538 + 10,
++		.vtotal = 2412 + 2538 + 10 + 10,
++	},
++	{
++		.clock = 373494,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 81,
++		.hsync_end = 1080 + 81 + 22,
++		.htotal = 1080 + 81 + 22 + 70,
++		.vdisplay = 2412,
++		.vsync_start = 2412 + 880,
++		.vsync_end = 2412 + 880 + 10,
++		.vtotal = 2412 + 880 + 10 + 10,
++	},
++	{
++		.clock = 373794,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 81,
++		.hsync_end = 1080 + 81 + 22,
++		.htotal = 1080 + 81 + 22 + 70,
++		.vdisplay = 2412,
++		.vsync_start = 2412 + 54,
++		.vsync_end = 2412 + 54 + 10,
++		.vtotal = 2412 + 54 + 10 + 10,
++	},
++	{
++		.clock = 373719,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 81,
++		.hsync_end = 1080 + 81 + 22,
++		.htotal = 1080 + 81 + 22 + 70,
++		.vdisplay = 2412,
++		.vsync_start = 2412 + 7510,
++		.vsync_end = 2412 + 7510 + 10,
++		.vtotal = 2412 + 7510 + 10 + 10,
++	},
++	{
++		.clock = 373607,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 81,
++		.hsync_end = 1080 + 81 + 22,
++		.htotal = 1080 + 81 + 22 + 70,
++		.vdisplay = 2412,
++		.vsync_start = 2412 + 4194,
++		.vsync_end = 2412 + 4194 + 10,
++		.vtotal = 2412 + 4194 + 10 + 10,
++	},
++	{
++		.clock = 373614,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 81,
++		.hsync_end = 1080 + 81 + 22,
++		.htotal = 1080 + 81 + 22 + 70,
++		.vdisplay = 2412,
++		.vsync_start = 2412 + 3780,
++		.vsync_end = 2412 + 3780 + 10,
++		.vtotal = 2412 + 3780 + 10 + 10,
++	},
++	{
++		.clock = 373644,
++		.hdisplay = 1080,
++		.hsync_start = 1080 + 81,
++		.hsync_end = 1080 + 81 + 22,
++		.htotal = 1080 + 81 + 22 + 70,
++		.vdisplay = 2412,
++		.vsync_start = 2412 + 3532,
++		.vsync_end = 2412 + 3532 + 10,
++		.vtotal = 2412 + 3532 + 10 + 10,
++	},
++};
++
++static struct mtk_panel_params qqcandy_params = {
++	.pll_clk = 550,
++	.phy_timcon = {
++		.hs_trail = 15,
++		.clk_trail = 15,
++	},
++	.cust_esd_check = 0,
++	.esd_check_enable = 1,
++	.lcm_esd_check_table[0] = {
++		.cmd = 0x0A, .count = 1, .para_list[0] = 0x9C,
++	},
++	.lane_swap_en = 0,
++	.lane_swap[0][MIPITX_PHY_LANE_0] = MIPITX_PHY_LANE_0,
++	.lane_swap[0][MIPITX_PHY_LANE_1] = MIPITX_PHY_LANE_1,
++	.lane_swap[0][MIPITX_PHY_LANE_2] = MIPITX_PHY_LANE_3,
++	.lane_swap[0][MIPITX_PHY_LANE_3] = MIPITX_PHY_LANE_2,
++	.lane_swap[0][MIPITX_PHY_LANE_CK] = MIPITX_PHY_LANE_CK,
++	.lane_swap[0][MIPITX_PHY_LANE_RX] = MIPITX_PHY_LANE_0,
++	.lane_swap[1][MIPITX_PHY_LANE_0] = MIPITX_PHY_LANE_0,
++	.lane_swap[1][MIPITX_PHY_LANE_1] = MIPITX_PHY_LANE_1,
++	.lane_swap[1][MIPITX_PHY_LANE_2] = MIPITX_PHY_LANE_3,
++	.lane_swap[1][MIPITX_PHY_LANE_3] = MIPITX_PHY_LANE_2,
++	.lane_swap[1][MIPITX_PHY_LANE_CK] = MIPITX_PHY_LANE_CK,
++	.lane_swap[1][MIPITX_PHY_LANE_RX] = MIPITX_PHY_LANE_0,
++	.lcm_color_mode = MTK_DRM_COLOR_MODE_DISPLAY_P3,
++	.output_mode = MTK_PANEL_DSC_SINGLE_PORT,
++	.dsc_params = {
++		.enable = 1,
++		.ver = 17,
++		.slice_mode = 1,
++		.rgb_swap = 0,
++		.dsc_cfg = 34,
++		.rct_on = 1,
++		.bit_per_channel = 8,
++		.dsc_line_buf_depth = 9,
++		.bp_enable = 1,
++		.bit_per_pixel = 128,
++		.pic_height = 2412,
++		.pic_width = 1080,
++		.slice_height = 12,
++		.slice_width = 540,
++		.chunk_size = 540,
++		.xmit_delay = 170,
++		.dec_delay = 526,
++		.scale_value = 32,
++		.increment_interval = 67,
++		.decrement_interval = 7,
++		.line_bpg_offset = 12,
++		.nfl_bpg_offset = 2235,
++		.slice_bpg_offset = 2170,
++		.initial_offset = 6144,
++		.final_offset = 7072,
++		.flatness_minqp = 3,
++		.flatness_maxqp = 12,
++		.rc_model_size = 8192,
++		.rc_edge_factor = 6,
++		.rc_quant_incr_limit0 = 11,
++		.rc_quant_incr_limit1 = 11,
++		.rc_tgt_offset_hi = 3,
++		.rc_tgt_offset_lo = 3,
++	},
++	.data_rate = 1100,
++	.vendor = "NT36672C_TIANMA_QQtang",
++	.manufacture = "QQtang_nt_tianma36672c",
++};
++
++static void qqcandy_gamma_enter(void *dsi, dcs_write_gce cb, void *handle)
++{
++	const u8 bl_tb1[] = { 0xff, 0x20 };
++	const u8 bl_tb2[] = { 0xfb, 0x01 };
++
++	const u8 bl_tb3[] = { 0xae, 0x01 };
++
++	const u8 bl_tb4[] = { 0x95, 0x09 };
++	const u8 bl_tb5[] = { 0x96, 0x09 };
++	const u8 bl_tb6[] = { 0xb0, 0x00, 0x00, 0x00, 0x05, 0x00, 0x0d, 0x00, 0x15, 0x00, 0x1d,
++		0x00, 0x24, 0x00, 0x2b, 0x00, 0x31 };
++	const u8 bl_tb7[] = { 0xb1, 0x00, 0x38, 0x00, 0x4f, 0x00, 0x65, 0x00, 0x8d, 0x00, 0xb2,
++		0x00, 0xf9, 0x01, 0x40, 0x01, 0x42 };
++	const u8 bl_tb8[] = { 0xb2, 0x01, 0x8d, 0x01, 0xe8, 0x02, 0x2e, 0x02, 0x7b, 0x02, 0xb2,
++		0x02, 0xf4, 0x03, 0x07, 0x03, 0x1b };
++	const u8 bl_tb9[] = { 0xb3, 0x03, 0x31, 0x03, 0x4a, 0x03, 0x69, 0x03, 0x90, 0x03, 0xb6,
++		0x03, 0xbc, 0x00, 0x00 };
++
++	cb(dsi, handle, bl_tb1, ARRAY_SIZE(bl_tb1));
++	cb(dsi, handle, bl_tb2, ARRAY_SIZE(bl_tb2));
++	cb(dsi, handle, bl_tb3, ARRAY_SIZE(bl_tb3));
++	cb(dsi, handle, bl_tb4, ARRAY_SIZE(bl_tb4));
++	cb(dsi, handle, bl_tb5, ARRAY_SIZE(bl_tb5));
++	cb(dsi, handle, bl_tb1, ARRAY_SIZE(bl_tb1));
++	cb(dsi, handle, bl_tb2, ARRAY_SIZE(bl_tb2));
++
++	cb(dsi, handle, bl_tb6, ARRAY_SIZE(bl_tb6));
++	cb(dsi, handle, bl_tb7, ARRAY_SIZE(bl_tb7));
++	cb(dsi, handle, bl_tb8, ARRAY_SIZE(bl_tb8));
++	cb(dsi, handle, bl_tb9, ARRAY_SIZE(bl_tb9));
++}
++
++static void qqcandy_gamma_exit(void *dsi, dcs_write_gce cb, void *handle)
++{
++	const u8 bl_tb1[] = { 0xff, 0x20 };
++	const u8 bl_tb2[] = { 0xfb, 0x01 };
++
++	const u8 bl_tb3[] = { 0xae, 0x01 };
++
++	const u8 bl_tb4[] = { 0x95, 0xd1 };
++	const u8 bl_tb5[] = { 0x96, 0xd1 };
++	const u8 bl_tb6[] = { 0xb0, 0x00, 0x00, 0x00, 0x20, 0x00, 0x47, 0x00, 0x65, 0x00, 0x7e,
++		0x00, 0x95, 0x00, 0xa9, 0x00, 0xbb };
++	const u8 bl_tb7[] = { 0xb1, 0x00, 0xcc, 0x01, 0x06, 0x01, 0x2e, 0x01, 0x70, 0x01, 0x9e,
++		0x01, 0xe9, 0x02, 0x22, 0x02, 0x24 };
++	const u8 bl_tb8[] = { 0xb2, 0x02, 0x5b, 0x02, 0x99, 0x02, 0xc3, 0x02, 0xf7, 0x03, 0x1b,
++		0x03, 0x43, 0x03, 0x52, 0x03, 0x5f };
++	const u8 bl_tb9[] = { 0xb3, 0x03, 0x70, 0x03, 0x82, 0x03, 0x98, 0x03, 0xac, 0x03, 0xd0,
++		0x03, 0xd8, 0x00, 0x00 };
++
++	cb(dsi, handle, bl_tb1, ARRAY_SIZE(bl_tb1));
++	cb(dsi, handle, bl_tb2, ARRAY_SIZE(bl_tb2));
++	cb(dsi, handle, bl_tb3, ARRAY_SIZE(bl_tb3));
++	cb(dsi, handle, bl_tb4, ARRAY_SIZE(bl_tb4));
++	cb(dsi, handle, bl_tb5, ARRAY_SIZE(bl_tb5));
++	cb(dsi, handle, bl_tb1, ARRAY_SIZE(bl_tb1));
++	cb(dsi, handle, bl_tb2, ARRAY_SIZE(bl_tb2));
++
++	cb(dsi, handle, bl_tb6, ARRAY_SIZE(bl_tb6));
++	cb(dsi, handle, bl_tb7, ARRAY_SIZE(bl_tb7));
++	cb(dsi, handle, bl_tb8, ARRAY_SIZE(bl_tb8));
++	cb(dsi, handle, bl_tb9, ARRAY_SIZE(bl_tb9));
++}
++
++static void qqcandy_cabc_switch(void *dsi, dcs_write_gce cb, void *handle,
++			       unsigned int level)
++{
++	const u8 page[] = { 0xff, 0x10 };
++	const u8 unlock[] = { 0xfb, 0x01 };
++	const u8 dimming[] = { 0x53, 0x2c };
++	const u8 cabc[] = { 0x55, level };
++
++	if (!cb || level > 3)
++		return;
++
++	cb(dsi, handle, page, sizeof(page));
++	cb(dsi, handle, unlock, sizeof(unlock));
++	if (qqcandy_dimming)
++		cb(dsi, handle, dimming, sizeof(dimming));
++	cb(dsi, handle, cabc, sizeof(cabc));
++	qqcandy_cabc = level;
++}
++
++static int qqcandy_set_backlight(void *dsi, dcs_write_gce cb, void *handle,
++			       unsigned int level)
++{
++	const u8 page[] = { 0xff, 0x10 };
++	const u8 unlock[] = { 0xfb, 0x01 };
++	const u8 dimming_off[] = { 0x53, 0x24 };
++	const u8 dimming_on[] = { 0x53, 0x2c };
++	const u8 backlight_off[] = { 0x53, 0x0c };
++	const u8 pwm_off[] = { 0x68, 0x01, 0x01 };
++	const u8 cabc[] = { 0x55, qqcandy_cabc };
++	u8 brightness[] = { MIPI_DCS_SET_DISPLAY_BRIGHTNESS, 0, 0 };
++
++	if (!cb)
++		return -EINVAL;
++
++	level = min_t(unsigned int, level, QQCANDY_MAX_BRIGHTNESS);
++	if (level && level < 14 && !qqcandy_low_gamma) {
++		qqcandy_gamma_enter(dsi, cb, handle);
++		qqcandy_low_gamma = true;
++	} else if (level >= 14 && qqcandy_low_gamma) {
++		qqcandy_gamma_exit(dsi, cb, handle);
++		qqcandy_low_gamma = false;
++	} else if (!level) {
++		qqcandy_low_gamma = false;
++	}
++
++	cb(dsi, handle, page, sizeof(page));
++	cb(dsi, handle, unlock, sizeof(unlock));
++	if (!level) {
++		qqcandy_dimming = false;
++		cb(dsi, handle, pwm_off, sizeof(pwm_off));
++		cb(dsi, handle, backlight_off, sizeof(backlight_off));
++	} else if (qqcandy_dimming) {
++		cb(dsi, handle, dimming_on, sizeof(dimming_on));
++		qqcandy_dimming = false;
++	}
++
++	if (!qqcandy_brightness) {
++		usleep_range(15000, 15100);
++		if (qqcandy_cabc)
++			cb(dsi, handle, cabc, sizeof(cabc));
++		if (qqcandy_cabc == 3)
++			cb(dsi, handle, dimming_on, sizeof(dimming_on));
++		else
++			cb(dsi, handle, dimming_off, sizeof(dimming_off));
++		qqcandy_dimming = true;
++	}
++
++	brightness[1] = level >> 8;
++	brightness[2] = level & 0xff;
++	cb(dsi, handle, brightness, sizeof(brightness));
++	qqcandy_brightness = level;
++	return 0;
++}
++
++static int qqcandy_restore_backlight(void *dsi, dcs_write_gce cb, void *handle)
++{
++	const u8 brightness[] = {
++		MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
++		qqcandy_brightness >> 8, qqcandy_brightness & 0xff,
++	};
++
++	if (!cb)
++		return -EINVAL;
++	cb(dsi, handle, brightness, sizeof(brightness));
++	return 1;
++}
++
++/* The board uses identical link and DSC parameters across all modes. */
++static int qqcandy_ext_param_get(struct drm_panel *panel, struct drm_connector *connector,
++				struct mtk_panel_params **params, unsigned int mode)
++{
++	*params = &qqcandy_params;
++	return 0;
++}
++
++static struct mtk_panel_funcs qqcandy_ext_funcs = {
++	.reset = qqcandy_reset,
++	.set_backlight_cmdq = qqcandy_set_backlight,
++	.ext_param_get = qqcandy_ext_param_get,
++	.panel_poweron = qqcandy_power_on,
++	.panel_poweroff = qqcandy_power_off,
++	.esd_backlight_recovery = qqcandy_restore_backlight,
++	.cabc_switch = qqcandy_cabc_switch,
++};
++
++static int qqcandy_get_modes(struct drm_panel *panel, struct drm_connector *connector)
++{
++	struct drm_display_mode *mode;
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(qqcandy_modes); i++) {
++		mode = drm_mode_duplicate(connector->dev, &qqcandy_modes[i]);
++		if (!mode)
++			return i ? (int)i : -ENOMEM;
++
++		drm_mode_set_name(mode);
++		mode->type = DRM_MODE_TYPE_DRIVER;
++		if (!i)
++			mode->type |= DRM_MODE_TYPE_PREFERRED;
++		drm_mode_probed_add(connector, mode);
++	}
++
++	connector->display_info.width_mm = 68;
++	connector->display_info.height_mm = 153;
++	return ARRAY_SIZE(qqcandy_modes);
++}
++
++static const struct drm_panel_funcs qqcandy_panel_funcs = {
++	.prepare = qqcandy_prepare,
++	.unprepare = qqcandy_unprepare,
++	.get_modes = qqcandy_get_modes,
++};
++
++static int qqcandy_setup_gpio(struct gpio_desc *gpio, int *level)
++{
++	int ret;
++
++	if (IS_ERR(gpio))
++		return PTR_ERR(gpio);
++
++	ret = gpiod_get_value_cansleep(gpio);
++	if (ret < 0)
++		return ret;
++
++	*level = ret;
++	return gpiod_direction_output(gpio, *level);
++}
++
++static int qqcandy_dsi_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct device_node *host, *endpoint, *remote;
++	struct mtk_panel_ctx *ext;
++	struct qqcandy_panel *ctx;
++	int reset, bias_pos, bias_neg;
++	int ret;
++
++	host = of_get_parent(dev->of_node);
++	if (!host)
++		return -ENODEV;
++	endpoint = of_graph_get_next_endpoint(host, NULL);
++	of_node_put(host);
++	if (!endpoint)
++		return -ENODEV;
++	remote = of_graph_get_remote_port_parent(endpoint);
++	of_node_put(endpoint);
++	ret = remote == dev->of_node ? 0 : -ENODEV;
++	of_node_put(remote);
++	if (ret)
++		return ret;
++
++	mutex_lock(&qqcandy_bias_lock);
++	ret = qqcandy_bias_client ? 0 : -EPROBE_DEFER;
++	mutex_unlock(&qqcandy_bias_lock);
++	if (ret)
++		return dev_err_probe(dev, ret, "LCD bias controller unavailable\n");
++
++	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
++			  MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_NO_EOT_PACKET |
++			  MIPI_DSI_CLOCK_NON_CONTINUOUS;
++
++	ctx->vufsldo = devm_regulator_get(dev, "vufsldo");
++	if (IS_ERR(ctx->vufsldo))
++		return dev_err_probe(dev, PTR_ERR(ctx->vufsldo), "failed to get vufsldo\n");
++	ret = regulator_set_voltage(ctx->vufsldo, 1800000, 1800000);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to set vufsldo voltage\n");
++
++	ctx->reset = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
++	ret = qqcandy_setup_gpio(ctx->reset, &reset);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get reset GPIO\n");
++
++	ctx->bias_pos = devm_gpiod_get_index(dev, "bias", 0, GPIOD_ASIS);
++	ret = qqcandy_setup_gpio(ctx->bias_pos, &bias_pos);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get positive bias GPIO\n");
++
++	ctx->bias_neg = devm_gpiod_get_index(dev, "bias", 1, GPIOD_ASIS);
++	ret = qqcandy_setup_gpio(ctx->bias_neg, &bias_neg);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get negative bias GPIO\n");
++
++	drm_panel_init(&ctx->panel, dev, &qqcandy_panel_funcs, DRM_MODE_CONNECTOR_DSI);
++
++	/* Keep the live LK scanout when the panel rails and reset are active. */
++	if (reset && bias_pos && bias_neg) {
++		ret = regulator_enable(ctx->vufsldo);
++		if (ret)
++			return dev_err_probe(dev, ret, "failed to keep vufsldo enabled\n");
++		ctx->powered = true;
++		ret = qqcandy_bias_configure();
++		if (ret) {
++			regulator_disable(ctx->vufsldo);
++			return dev_err_probe(dev, ret, "failed to configure LCD bias\n");
++		}
++		ctx->panel.prepared = true;
++		ctx->panel.enabled = true;
++	}
++
++	ret = devm_add_action_or_reset(dev, qqcandy_release_supply, ctx);
++	if (ret)
++		return ret;
++
++	ret = mtk_panel_ext_create(dev, &qqcandy_params, &qqcandy_ext_funcs, &ctx->panel);
++	if (ret)
++		return ret;
++
++	drm_panel_add(&ctx->panel);
++	ret = mipi_dsi_attach(dsi);
++	if (ret) {
++		drm_panel_remove(&ctx->panel);
++		ext = find_panel_ctx(&ctx->panel);
++		mtk_panel_detach(ext);
++		mtk_panel_remove(ext);
++		return dev_err_probe(dev, ret, "failed to attach Tianma panel to DSI\n");
++	}
++
++	dev_info(dev, "QQcandy Tianma NT36672C attached (%s)\n",
++		 ctx->panel.prepared ? "LK handoff" : "cold initialization");
++	return 0;
++}
++
++static void qqcandy_dsi_remove(struct mipi_dsi_device *dsi)
++{
++	struct qqcandy_panel *ctx = mipi_dsi_get_drvdata(dsi);
++	struct mtk_panel_ctx *ext = find_panel_ctx(&ctx->panel);
++
++	mipi_dsi_detach(dsi);
++	drm_panel_remove(&ctx->panel);
++	mtk_panel_detach(ext);
++	mtk_panel_remove(ext);
++}
++
++static const struct of_device_id qqcandy_dsi_of_match[] = {
++	{ .compatible = "oplus21143,tianma,nt36672c,vdo" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, qqcandy_dsi_of_match);
++
++static struct mipi_dsi_driver qqcandy_dsi_driver = {
++	.probe = qqcandy_dsi_probe,
++	.remove = qqcandy_dsi_remove,
++	.driver = {
++		.name = "oplus21143_tianma_nt36672c_dsi_vdo",
++		.of_match_table = qqcandy_dsi_of_match,
++	},
++};
++
++static int __init qqcandy_panel_module_init(void)
++{
++	int ret;
++
++	ret = i2c_add_driver(&qqcandy_bias_driver);
++	if (ret)
++		return ret;
++
++	mtk_panel_lock();
++	ret = mipi_dsi_driver_register(&qqcandy_dsi_driver);
++	mtk_panel_unlock();
++	if (ret)
++		i2c_del_driver(&qqcandy_bias_driver);
++	return ret;
++}
++module_init(qqcandy_panel_module_init);
++
++static void __exit qqcandy_panel_module_exit(void)
++{
++	mtk_panel_lock();
++	mipi_dsi_driver_unregister(&qqcandy_dsi_driver);
++	mtk_panel_unlock();
++	i2c_del_driver(&qqcandy_bias_driver);
++}
++module_exit(qqcandy_panel_module_exit);
++
++MODULE_DESCRIPTION("OPPO 21143/22801 Tianma NT36672C DSI panel");
++MODULE_LICENSE("GPL");
