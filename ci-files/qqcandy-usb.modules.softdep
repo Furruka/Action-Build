@@ -1,0 +1,9 @@
+# Recovery probe order for the MT6375 on the MT6895 I2C bus.
+softdep i2c_mt65xx pre: clk_mt6895 clk_mt6895_bus clk_mt6895_peri pinctrl_mt6895
+softdep mt6375 pre: i2c_mt65xx
+softdep mt6375_adc pre: mt6375
+softdep tcpc_mt6375 pre: mt6375_adc
+softdep mt6375_charger pre: mt6375_adc
+softdep mtk_chg_type_det pre: tcpc_mt6375 mt6375_charger
+softdep extcon_mtk_usb pre: tcpc_mt6375 mt6375_charger
+softdep tcpci_late_sync pre: mtu3 mtk_chg_type_det extcon_mtk_usb

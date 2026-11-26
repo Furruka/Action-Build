@@ -1,0 +1,27 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/tinysys_scmi/BUILD.bazel b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/tinysys_scmi/BUILD.bazel
+--- a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/tinysys_scmi/BUILD.bazel
++++ b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/tinysys_scmi/BUILD.bazel
+@@ -33,6 +33,9 @@
+     hdrs = [
+         "tinysys-scmi.h",
+         "protocol.h",
++        "//kernel-6.12:drivers/firmware/arm_scmi/common.h",
++        "//kernel-6.12:drivers/firmware/arm_scmi/notify.h",
++        "//kernel-6.12:drivers/firmware/arm_scmi/protocols.h",
+     ],
+ 	copts = [
+ 		"-I$(srctree)/drivers/firmware/arm_scmi",
+diff --git a/kernel/kernel_device_modules-6.12/drivers/rpmsg/BUILD.bazel b/kernel/kernel_device_modules-6.12/drivers/rpmsg/BUILD.bazel
+--- a/kernel/kernel_device_modules-6.12/drivers/rpmsg/BUILD.bazel
++++ b/kernel/kernel_device_modules-6.12/drivers/rpmsg/BUILD.bazel
+@@ -30,7 +30,9 @@
+     ],
+     hdrs = glob([
+         "**/*.h"
+-    ]),
++    ]) + [
++        "//kernel-6.12:drivers/rpmsg/rpmsg_internal.h",
++    ],
+     copts = [
+         "-I$(srctree)/drivers/rpmsg",
+     ],
