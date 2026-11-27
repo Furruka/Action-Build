@@ -91,6 +91,7 @@ _DISPLAY_DEPENDENCIES = [
     "drivers/misc/mediatek/boot_common:mtk_boot_common",
     "drivers/misc/mediatek/clkbuf:clkbuf",
     "drivers/misc/mediatek/cmdq/mailbox:mtk-cmdq-drv-ext",
+    "drivers/misc/mediatek/cmdq/mailbox:cmdq-platform-mt6895",
     "drivers/misc/mediatek/hwccf:hwccf",
     "drivers/misc/mediatek/iommu:iommu_debug",
     "drivers/misc/mediatek/iommu:iommu_secure",

@@ -19,5 +19,9 @@ softdep mtk_emi pre: mtk_dvfsrc
 softdep mtk_dvfsrc_regulator pre: mtk_dvfsrc
 softdep mmqos_mt6895 pre: mtk_emi
 softdep mtk_scpsys_mt6895 pre: clk_mt6895 clk_mt6895_mmsys clk_mt6895_mdpsys clk_mt6895_img clk_mt6895_vcodec clk_mt6895_cam clk_mt6895_ccu mt6315_regulator
+# Register SoC callbacks after CMDQ core probe and before display clients.
+softdep cmdq_platform_mt6895 pre: mtk_cmdq_drv_ext
+softdep mtk_mml pre: cmdq_platform_mt6895
+softdep mtk_mml_mt6895 pre: cmdq_platform_mt6895
 softdep oplus21143_tianma_nt36672c_dsi_vdo pre: mt6363_regulator i2c_mt65xx
-softdep mediatek_drm pre: mtk_scpsys_mt6895 mtk_dvfsrc_regulator mmqos_mt6895 pwm_mtk_disp oplus21143_tianma_nt36672c_dsi_vdo
+softdep mediatek_drm pre: mtk_scpsys_mt6895 mtk_dvfsrc_regulator mmqos_mt6895 pwm_mtk_disp oplus21143_tianma_nt36672c_dsi_vdo cmdq_platform_mt6895

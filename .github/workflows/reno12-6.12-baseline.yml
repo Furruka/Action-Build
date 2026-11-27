@@ -133,6 +133,7 @@ jobs:
           drm_lifetime="$GITHUB_WORKSPACE/ci-patches/0023-qqcandy-drm-master-lifetime.patch"
           dsi_power="$GITHUB_WORKSPACE/ci-patches/0024-qqcandy-dsi-probe-power.patch"
           tcpc_probe_io="$GITHUB_WORKSPACE/ci-patches/0025-qqcandy-tcpc-pre-registration-io.patch"
+          dual_pipe_links="$GITHUB_WORKSPACE/ci-patches/0026-qqcandy-mt6895-dual-pipe-virtual-links.patch"
           fragment="$GITHUB_WORKSPACE/ci-files/qqcandy-embed.config"
           printf 'Workflow commit %s\nKleaf kernel tree %s\nDevice modules tree %s\n' "$GITHUB_SHA" "$core" "$modules"
           git -C "$core" rev-parse HEAD
@@ -142,7 +143,7 @@ jobs:
             "$tianma_panel" "$drm_headers" "$drm_providers" "$typec_order" "$usb_probe" "$supplier_headers" \
             "$dsi_drm" "$dvfsrc_headers" "$dsi_conditional" "$lk_dramc" "$dramc_probe" "$display_probe" \
             "$xsphy_procfs" "$charger_publish" "$lk_emicen" "$project_data" "$tcpc_register" "$drm_lifetime" \
-            "$dsi_power" "$tcpc_probe_io" \
+            "$dsi_power" "$tcpc_probe_io" "$dual_pipe_links" \
             "$fragment" "$GITHUB_WORKSPACE/ci-files/board-embed.dtb"
           git -C "$core" apply --check --verbose "$patch"
           git -C "$core" apply --verbose "$patch"
@@ -195,6 +196,8 @@ jobs:
           git -C "$modules_repo" apply --verbose "$dsi_power"
           git -C "$modules_repo" apply --check --verbose "$tcpc_probe_io"
           git -C "$modules_repo" apply --verbose "$tcpc_probe_io"
+          git -C "$modules_repo" apply --check --verbose "$dual_pipe_links"
+          git -C "$modules_repo" apply --verbose "$dual_pipe_links"
           git -C "$core" status --short
           grep -F 'static struct mfdt_ctx ctx __initdata' "$core/arch/arm64/kernel/mtk_embed_merge.c"
           grep -Fx 'config MTK_EMBED_BOARD_DTB' "$core/arch/arm64/Kconfig"
@@ -319,7 +322,7 @@ jobs:
           mapfile -t module_outputs < <(awk -v dir="$(dirname "$deps")/" 'index($0, dir) == 1 {print}' ../recovery_outputs.log)
           test "${#module_outputs[@]}" -gt 0
           cp -L -- "${module_outputs[@]}" "$base_archive" "$stage/"
-          for module in mediatek-drm.ko oplus21143_tianma_nt36672c_dsi_vdo.ko \
+          for module in cmdq-platform-mt6895.ko mediatek-drm.ko oplus21143_tianma_nt36672c_dsi_vdo.ko \
             mt6375-adc.ko mtk_chg_type_det.ko tcpci_late_sync.ko mtk_wdt.ko \
             mtk-dvfsrc.ko mtk-dvfsrc-regulator.ko mtk-dvfsrc-devfreq.ko mtk-emi.ko \
             clk-mt6895-img.ko clk-mt6895-vcodec.ko clk-mt6895-cam.ko clk-mt6895-ccu.ko; do
