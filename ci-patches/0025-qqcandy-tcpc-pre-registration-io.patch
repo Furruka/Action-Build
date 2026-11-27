@@ -1,0 +1,25 @@
+diff --git a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c
+--- a/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c
++++ b/kernel/kernel_device_modules-6.12/drivers/misc/mediatek/typec/tcpc/tcpc_mt6375.c
+@@ -458,6 +458,10 @@
+ 	struct tcpc_device *tcpc = ddata->tcpc;
+ 	int ret = 0;
+ 
++	/* Probe checks the chip before registering the TCPC suspend state. */
++	if (!tcpc)
++		return regmap_bulk_write(ddata->rmap, reg, data, count);
++
+ 	atomic_inc(&tcpc->suspend_pending);
+ 	wait_event(tcpc->resume_wait_que, !atomic_read(&tcpc->is_suspended) ||
+ 		   !ddata->dev->parent->power.is_suspended);
+@@ -472,6 +476,10 @@
+ 	struct tcpc_device *tcpc = ddata->tcpc;
+ 	int ret = 0;
+ 
++	/* Probe checks the chip before registering the TCPC suspend state. */
++	if (!tcpc)
++		return regmap_bulk_read(ddata->rmap, reg, data, count);
++
+ 	atomic_inc(&tcpc->suspend_pending);
+ 	wait_event(tcpc->resume_wait_que, !atomic_read(&tcpc->is_suspended) ||
+ 		   !ddata->dev->parent->power.is_suspended);
