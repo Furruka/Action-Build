@@ -322,7 +322,7 @@ jobs:
           mapfile -t module_outputs < <(awk -v dir="$(dirname "$deps")/" 'index($0, dir) == 1 {print}' ../recovery_outputs.log)
           test "${#module_outputs[@]}" -gt 0
           cp -L -- "${module_outputs[@]}" "$base_archive" "$stage/"
-          for module in cmdq-platform-mt6895.ko mediatek-drm.ko oplus21143_tianma_nt36672c_dsi_vdo.ko \
+          for module in cmdq-platform-mt6895.ko mm-monitor-platform-mt6895.ko mediatek-drm.ko oplus21143_tianma_nt36672c_dsi_vdo.ko \
             mt6375-adc.ko mtk_chg_type_det.ko tcpci_late_sync.ko mtk_wdt.ko \
             mtk-dvfsrc.ko mtk-dvfsrc-regulator.ko mtk-dvfsrc-devfreq.ko mtk-emi.ko \
             clk-mt6895-img.ko clk-mt6895-vcodec.ko clk-mt6895-cam.ko clk-mt6895-ccu.ko; do

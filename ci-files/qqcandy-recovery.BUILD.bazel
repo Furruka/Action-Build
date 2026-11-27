@@ -100,12 +100,9 @@ _DISPLAY_DEPENDENCIES = [
     "drivers/misc/mediatek/mme:mme",
     "drivers/misc/mediatek/mminfra:mtk-mminfra-debug",
     "drivers/misc/mediatek/mminfra:mtk-mminfra-util",
-    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6789",
-    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6855",
-    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6858",
+    # These platform modules export the same symbols. Install only this SoC
+    # so depmod cannot select a foreign implementation by traversal order.
     "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6895",
-    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6991",
-    "drivers/misc/mediatek/mm_monitor:mm-monitor-platform-mt6993",
     "drivers/misc/mediatek/mm_monitor:mtk-mm-monitor-controller",
     "drivers/misc/mediatek/mmdebug:mtk-mmdebug-vcp-stub",
     "drivers/misc/mediatek/mmp/src:mmprofile",
